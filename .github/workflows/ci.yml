@@ -11,8 +11,19 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+      - run: cargo fmt --check
       - run: cargo test --all-targets --locked
       - run: cargo clippy --all-targets -- -D warnings
+  reference:
+    # The Python implementation is written from docs/SPEC.md alone; it must keep matching.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - run: pip install argon2-cffi
+      - run: python docs/reference.py | diff - docs/reference-expected.txt
   audit:
     runs-on: ubuntu-latest
     steps:

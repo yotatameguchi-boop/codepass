@@ -1,7 +1,13 @@
-# CodePass 生成仕様 v1
+# CodePass 生成仕様（v1 / v2）
 
 この文書だけで、別の言語・別の実装からも同じパスワードを再現できることを目的とする。
-仕様を変える場合は `spec_version` を上げ、v1 の処理は残す（古いパスワードを再生成するため）。
+仕様を変える場合は `spec_version` を上げ、古い版の処理は残す（古いパスワードを再生成するため）。
+
+- **v1**: 最初の仕様。サービス名は大文字小文字を区別する。
+- **v2**: 新しいパスワードの既定。サービス名をURLやホスト名から正規化し、使える記号を指定できる。
+
+v1とv2の違いは「識別子の正規化」「context」「記号の集合」「ラベルの版番号」だけで、Argon2id・確認コード・
+棄却サンプリングの手順は共通。
 
 > 実験段階の設計であり、第三者による暗号レビューは未実施。
 
@@ -18,13 +24,36 @@
 | `length` | 8〜64 | 文字数 |
 | `charset` | `strong` / `alnum` | 文字種プロファイル |
 | `require_classes` | 真偽 | 各文字種を最低1文字含めるか（既定: 真） |
+| `symbols` | ASCII記号の文字列 | v2のみ・任意。`strong` で使う記号を限定する。バイト値の昇順・重複なしに正規化して保存 |
 
-### 識別子の正規化
+### 識別子の正規化（v1）
 
 `site` と `account` は Unicode NFC に正規化してから UTF-8 バイト列にする。
 大文字小文字・前後の空白は**変更しない**（`GitHub.com` と `github.com` は別物）。
 
+### 識別子の正規化（v2）
+
+`account` は前後の空白（Unicode White_Space）を除いて NFC。大文字小文字は区別する。
+
+`site` は次の1回分の処理 `pass` を、結果が変わらなくなるまで繰り返す（最大で初回＋8回）。
+
+1. NFKC に正規化し、前後の空白を除く
+2. `://` を含めば、最初の `://` より後ろだけを残す
+3. 最初の `/` `?` `#` より前だけを残す
+4. `@` を含めば、最後の `@` より後ろだけを残す
+5. 最後の `:` より後ろが1文字以上の ASCII 数字で、その前が `:` を含まない（または `[` で始まり `]` で終わる）なら、`:` 以降を除く
+6. 先頭の空白と、末尾の `.` と空白を除く
+7. Unicode の小文字化（`String::to_lowercase` / Python `str.lower`）をしてから NFKC に正規化し、もう一度末尾の `.` と空白を除く
+8. `www.` で始まり、残りに `.` を含むなら `www.` を除く
+
+例: `https://user@WWW.GitHub.com:443/login?x` → `github.com`、`ＧｉｔＨｕｂ．ｃｏｍ` → `github.com`、
+`Bücher.example` → `bücher.example`、`My Bank` → `my bank`。
+
+IDNA（Punycode）変換はライブラリごとに挙動が違うため**使わない**。`xn--bcher-kva.example` と `bücher.example` は別のサービスとして扱う。
+
 ## 処理
+
+v1:
 
 ```
 code_hash = SHA-256(source)
@@ -41,6 +70,18 @@ context   = "CodePass/context/v1" || 0x00
 key       = HKDF-SHA256(salt = "CodePass/HKDF/v1", ikm = master, info = context, L = 32)
 ```
 
+v2（`site_key` / `account_key` は上記v2の正規化、`symset` は `strong` なら `symbols`（未指定なら SYMBOLS）、`alnum` なら空）:
+
+```
+context   = "CodePass/context/v2" || 0x00
+          || code_hash
+          || u32be(len(site_key))    || site_key
+          || u32be(len(account_key)) || account_key
+          || u32be(revision) || u8(length) || u8(charset) || u8(require_classes)
+          || u8(len(symset)) || symset
+key       = HKDF-SHA256(salt = "CodePass/HKDF/v2", ikm = master, info = context, L = 32)
+```
+
 ### 文字列の生成
 
 文字集合（この順に連結したものを `alphabet` とする）:
@@ -52,15 +93,16 @@ DIGITS  = 0123456789
 SYMBOLS = !#$%&()*+,-./:;<=>?@[]^_{|}~      (strong のみ。28文字。" ' ` \ と空白は含まない)
 ```
 
-- `strong`: 90文字 / `alnum`: 62文字
-- `limit = floor(256 / |alphabet|) * |alphabet|`（strong = 180, alnum = 248）
+- v1: `strong` は LOWER+UPPER+DIGITS+SYMBOLS の90文字、`alnum` は62文字
+- v2: LOWER+UPPER+DIGITS+`symset`
+- `limit = floor(256 / |alphabet|) * |alphabet|`（v1 の strong = 180, alnum = 248）
 
-バイト列は `block_i = HMAC-SHA256(key, "CodePass/stream/v1" || 0x00 || u64be(i))`（i = 0, 1, 2, …）を
+バイト列は `block_i = HMAC-SHA256(key, "CodePass/stream/v{版}" || 0x00 || u64be(i))`（i = 0, 1, 2, …）を
 順につなげたもの。1バイト `b` ずつ読み、`b < limit` なら `alphabet[b mod |alphabet|]` を採用、
 それ以外は捨てる（棄却サンプリング。剰余による偏りを避ける）。
 
 `length` 文字たまったら候補とする。`require_classes` が真で、候補が LOWER・UPPER・DIGITS
-（strong なら SYMBOLS も）をそれぞれ1文字以上含まない場合は候補ごと捨て、**バイト列の続きから**
+（記号を使うなら記号の集合も）をそれぞれ1文字以上含まない場合は候補ごと捨て、**バイト列の続きから**
 次の候補を作る。候補単位で捨てるので、条件を満たすパスワード全体の中で一様になる。
 
 候補の試行は 1,000,000 回で打ち切ってエラーにする（実際には到達しない）。
@@ -85,7 +127,12 @@ check_code = WORDS[code[0]] + "-" + WORDS[code[1]] + "-" + WORDS[code[2]]
 
 ## テストベクター
 
-`tests/vectors.rs` に固定入力と期待される出力（パスワード4件と確認コード）を置いている。別実装はこれと一致することを確認すること。
+`tests/vectors.rs` に固定入力と期待される出力（v1を4件・v2を3件と確認コード）を置いている。
+別実装はこれと一致することを確認すること。仕様だけから書いた Python 版 `docs/reference.py` の出力は
+`docs/reference-expected.txt` と一致し、CIで毎回確かめている。
+
+正規化については、Rust版とPython版に記号・全角文字・各種言語の文字を混ぜた25,000件のランダムな入力を与え、
+結果が完全に一致することを確認した（Unicodeのバージョン差で、新しく追加された文字の扱いが変わる可能性は残る）。
 
 ## プロファイル（バックアップ）形式
 
@@ -100,7 +147,7 @@ check_code = WORDS[code[0]] + "-" + WORDS[code[1]] + "-" + WORDS[code[2]]
     {
       "source_sha256": "<32バイトの16進>",
       "settings": { "site": "github.com", "account": "", "length": 24, "charset": "strong",
-                    "revision": 1, "require_classes": true, "spec_version": 1 },
+                    "revision": 1, "require_classes": true, "spec_version": 2, "symbols": "!#@" },
       "source_path": "/Users/me/keys/main.py",
       "git_commit": "<コミットID。Gitから読んだときだけ>"
     }
@@ -109,6 +156,7 @@ check_code = WORDS[code[0]] + "-" + WORDS[code[1]] + "-" + WORDS[code[2]]
 ```
 
 - `format_version` 1 は `source_path` / `git_commit` を持たない旧形式。どちらも読み込める。
+- `site` は入力されたまま保存し、照合のたびにそのエントリの版の正規化をかける。
 - エントリは「サービス・アカウント・更新番号」で区別する。同じ組み合わせで内容が違う登録は、明示しない限り置き換えない。
 - `init` / `profile export` / `profile import` は既存ファイルを上書きしない。登録の追加・削除は一時ファイルに書いてから
   置き換え、その前後で salt が変わっていないことを確かめる（salt が変わると全パスワードを再生成できなくなるため）。

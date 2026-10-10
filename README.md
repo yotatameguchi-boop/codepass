@@ -11,8 +11,13 @@
 
 ## インストール
 
+[Releases](https://github.com/yotatameguchi-boop/codepass/releases) から、macOS（Apple Silicon / Intel）・Linux（x86_64 / ARM64）・Windows 向けの
+実行ファイルを入手できます。`SHA256SUMS` でファイルが壊れていないか確かめてください。
+
+Rust がある場合はソースからも入れられます。
+
 ```sh
-cargo install --git https://github.com/yotatameguchi-boop/codepass
+cargo install --locked --git https://github.com/yotatameguchi-boop/codepass
 ```
 
 ## 使い方
@@ -54,6 +59,7 @@ codepass generate main.py --site github.com --git codepass-source
 codepass generate main.py --site github.com --length 32
 codepass generate main.py --site github.com --account work
 codepass generate main.py --site example.com --charset alnum     # 記号を使えないサービス向け
+codepass generate main.py --site bank.example --symbols '!@#$%'   # 使える記号が決まっているサービス向け
 
 # パスワードを変えたいときは更新番号を上げる（古い番号も登録に残る）
 codepass generate main.py --site github.com --git codepass-source --revision 2
@@ -66,6 +72,14 @@ codepass profile remove 3               # 登録の削除
 
 同じサービス・更新番号で内容が違う登録をしようとすると、シークレットを聞く前に止まって理由を表示します
 （多くはファイルが変わっていたとき）。意図的なら `--replace`、登録せずに出すだけなら `--no-save`。
+
+### サービス名の書き方
+
+`https://www.GitHub.com/login` も `GITHUB.COM` も `github.com` として扱います（URLから取り出したホスト名を、小文字・全角→半角に
+そろえ、先頭の `www.` を除く）。ブラウザのアドレス欄からそのまま貼り付けて大丈夫です。どの名前として扱ったかは毎回表示されます。
+
+> v0.1 で作ったパスワード（生成仕様v1）はこの正規化の対象外で、これまでどおり大文字・小文字を区別します。
+> 登録済みのものは `get` でそのまま呼び出せ、値は変わりません。
 
 ### バックアップと復元
 
@@ -82,7 +96,8 @@ codepass --config codepass-backup.json regenerate main.py --entry 1   # ファ�
 ## 気をつけること
 
 - **ソースコードは1バイトでも変わると別のパスワードになります。** `--git` で固定するのがおすすめです。
-- サービス名は大文字・小文字を区別します（`GitHub.com` と `github.com` は別物）。
+- `xn--` で始まる表記（Punycode）と、それを日本語などで書いた表記は別のサービスとして扱います。普段見ている表記で統一してください。
+- マスターシークレットが推測されやすそうな場合は警告を出します（パスワードは作ります）。無関係な単語を5つ以上つなげたものなどがおすすめです。
 - マスターシークレットを打ち間違えてもエラーにはならず、別のパスワードが出ます。確認コードで気づけます。
 - クリップボードはコピー履歴に残さないよう指定していますが、対応していないクリップボード管理ツールでは残る場合があります。
 - マスターシークレットはコマンド引数・環境変数・パイプからは受け取りません（履歴に残さないため）。
@@ -92,13 +107,17 @@ codepass --config codepass-backup.json regenerate main.py --entry 1   # ファ�
 
 SHA-256（コード）→ Argon2id（マスターシークレット, 64MiB / 3回 / 並列度1）→ HKDF-SHA256（コードのハッシュ・サービス・アカウント・更新番号などを混ぜる）→ HMAC-SHA256 の出力から棄却サンプリングで文字を選ぶ。
 
-詳細は [docs/SPEC.md](docs/SPEC.md)。仕様だけから書いた別実装 [docs/reference.py](docs/reference.py) が、[tests/vectors.rs](tests/vectors.rs) のテストベクターと一致することを確認しています。
+詳細は [docs/SPEC.md](docs/SPEC.md)。仕様だけから書いた別実装 [docs/reference.py](docs/reference.py) が
+[tests/vectors.rs](tests/vectors.rs) のテストベクターと一致することを、CIで毎回確かめています。
+文字の偏りがないことの統計的な検定や、ランダムな入力に対する性質テスト（proptest）も入っています。
 
 ## 開発
 
 ```sh
+cargo fmt --check
 cargo test
 cargo clippy --all-targets -- -D warnings
+python docs/reference.py | diff - docs/reference-expected.txt   # pip install argon2-cffi
 ```
 
 [CONTRIBUTING.md](CONTRIBUTING.md) と [SECURITY.md](SECURITY.md) も見てください。ライセンスは [MIT](LICENSE)。

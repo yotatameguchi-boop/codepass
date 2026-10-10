@@ -15,8 +15,7 @@ pub fn source_hash(path: &Path) -> Result<[u8; 32]> {
         return Err("通常ファイルを指定してください".into());
     }
     let mut bytes = Vec::new();
-    file.take(MAX_SOURCE_BYTES + 1).read_to_end(&mut bytes)
-        .map_err(|_| "ソースファイルを読み込めません")?;
+    file.take(MAX_SOURCE_BYTES + 1).read_to_end(&mut bytes).map_err(|_| "ソースファイルを読み込めません")?;
     if bytes.len() as u64 > MAX_SOURCE_BYTES {
         return Err("ソースファイルの上限は1MiBです".into());
     }

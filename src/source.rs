@@ -1,6 +1,10 @@
 use crate::{Result, MAX_SOURCE_BYTES};
 use sha2::{Digest, Sha256};
-use std::{io::Read, path::{Path, PathBuf}, process::{Command, Stdio}};
+use std::{
+    io::Read,
+    path::{Path, PathBuf},
+    process::{Command, Stdio},
+};
 
 /// Where the code bytes came from, so the same bytes can be read again later.
 pub struct Loaded {
@@ -16,7 +20,11 @@ pub fn load(path: &Path, git_rev: Option<&str>) -> Result<Loaded> {
         None => Ok(Loaded { sha256: crate::source_hash(path)?, path: absolute(path)?, git_commit: None }),
         Some(rev) => {
             let (commit, bytes) = read_git(path, rev)?;
-            Ok(Loaded { sha256: Sha256::digest(bytes).into(), path: absolute(path)?, git_commit: Some(commit) })
+            Ok(Loaded {
+                sha256: Sha256::digest(bytes).into(),
+                path: absolute(path)?,
+                git_commit: Some(commit),
+            })
         }
     }
 }
@@ -47,18 +55,31 @@ fn read_git(path: &Path, rev: &str) -> Result<(String, Vec<u8>)> {
 }
 
 fn git(dir: &Path, args: &[&str]) -> Result<Vec<u8>> {
-    let mut child = Command::new("git").arg("-C").arg(dir)
-        .args(["-c", "core.fsmonitor=false"]).args(args)
-        .stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null())
-        .spawn().map_err(|_| "gitコマンドを実行できません")?;
+    let mut child = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["-c", "core.fsmonitor=false"])
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|_| "gitコマンドを実行できません")?;
     let mut bytes = Vec::new();
-    child.stdout.take().ok_or("gitの出力を読めません")?
-        .take(MAX_SOURCE_BYTES + 1).read_to_end(&mut bytes).map_err(|_| "gitの出力を読めません")?;
+    child
+        .stdout
+        .take()
+        .ok_or("gitの出力を読めません")?
+        .take(MAX_SOURCE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| "gitの出力を読めません")?;
     if bytes.len() as u64 > MAX_SOURCE_BYTES {
         let _ = child.kill();
         let _ = child.wait();
         return Err("ソースファイルの上限は1MiBです".into());
     }
-    if !child.wait().map_err(|_| "gitの終了を待てません")?.success() { return Err("gitが失敗しました".into()); }
+    if !child.wait().map_err(|_| "gitの終了を待てません")?.success() {
+        return Err("gitが失敗しました".into());
+    }
     Ok(bytes)
 }

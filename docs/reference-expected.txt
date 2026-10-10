@@ -1,0 +1,8 @@
+VECTOR github.com %EF^*4f)wo&7W!F-]@d;s:${
+VECTOR github.com {I;1w/U>UI_:J)Kq%[vv!->V
+VECTOR example.com ebG0VWVW
+VECTOR café.example +Q@&iI=1_NHvin~hRF54#^V3AHQq:+;Nu4~q:c#L}^.19dnqQ<?>(zONv3e3Eput
+VECTOR2 github.com {V%6C]_6?3LL{7WjgmK*w3d5
+VECTOR2 example.com C4NjZMNsIEn1zgt!
+VECTOR2 bücher.example SQu45BiZtd3p
+CHECK fountain-basil-oyster

@@ -1,9 +1,14 @@
 [package]
 name = "codepass"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 license = "MIT"
 description = "Offline, deterministic passwords from source code and a master secret"
+repository = "https://github.com/yotatameguchi-boop/codepass"
+readme = "README.md"
+keywords = ["password", "argon2", "cli", "deterministic", "kdf"]
+categories = ["command-line-utilities", "cryptography"]
+exclude = [".github/", "tests/*.proptest-regressions"]
 
 [dependencies]
 arboard = { version = "3.6", default-features = false }
@@ -21,7 +26,9 @@ serde_json = "1"
 sha2 = "0.10"
 unicode-normalization = "0.1"
 zeroize = "1"
+zxcvbn = "3.1.1"
 
 [dev-dependencies]
+proptest = "1.12.0"
 tempfile = "3"
 

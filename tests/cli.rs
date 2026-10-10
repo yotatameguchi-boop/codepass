@@ -1,8 +1,16 @@
-use std::{fs, process::{Command, Stdio}};
+use std::{
+    fs,
+    process::{Command, Stdio},
+};
 
 fn codepass(config: &std::path::Path, args: &[&str]) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_codepass")).arg("--config").arg(config).args(args)
-        .stdin(Stdio::null()).output().unwrap()
+    Command::new(env!("CARGO_BIN_EXE_codepass"))
+        .arg("--config")
+        .arg(config)
+        .args(args)
+        .stdin(Stdio::null())
+        .output()
+        .unwrap()
 }
 
 #[test]

@@ -1,6 +1,15 @@
 use clap::{Args, Parser, Subcommand};
-use codepass::{crypto::{self, Charset, Settings}, profile::{self, Entry, Saved}, source, Result};
-use std::{io::{self, IsTerminal, Write}, path::PathBuf, sync::mpsc, time::Duration};
+use codepass::{
+    crypto::{self, Charset, Settings},
+    profile::{self, Entry, Saved},
+    source, Result,
+};
+use std::{
+    io::{self, IsTerminal, Write},
+    path::PathBuf,
+    sync::mpsc,
+    time::Duration,
+};
 use zeroize::Zeroizing;
 
 #[derive(Parser)]
@@ -8,7 +17,8 @@ use zeroize::Zeroizing;
 struct Cli {
     #[arg(long, global = true, help = "設定ファイルのパス")]
     config: Option<PathBuf>,
-    #[command(subcommand)] command: Command,
+    #[command(subcommand)]
+    command: Command,
 }
 
 #[derive(Args)]
@@ -29,15 +39,27 @@ enum Command {
     #[command(about = "ソースコードからパスワードを生成し、設定を登録する")]
     Generate {
         source: PathBuf,
-        #[arg(long)] site: String,
-        #[arg(long, default_value = "")] account: String,
-        #[arg(long, default_value_t = 24)] length: usize,
-        #[arg(long, value_enum, default_value_t = Charset::Strong)] charset: Charset,
-        #[arg(long, default_value_t = 1)] revision: u32,
-        #[arg(long, default_value_t = 1)] spec_version: u32,
+        #[arg(long)]
+        site: String,
+        #[arg(long, default_value = "")]
+        account: String,
+        #[arg(long, default_value_t = 24)]
+        length: usize,
+        #[arg(long, value_enum, default_value_t = Charset::Strong)]
+        charset: Charset,
+        #[arg(long, default_value_t = 1)]
+        revision: u32,
+        #[arg(long, default_value_t = crypto::LATEST_SPEC, help = "生成仕様のバージョン（古いパスワードを作り直すとき用）")]
+        spec_version: u32,
+        #[arg(long, value_name = "記号", help = "使える記号を限定する（例: --symbols '!@#$%'）。仕様v2以降")]
+        symbols: Option<String>,
         #[arg(long, help = "各文字種を必ず含む条件を解除")]
         no_require_classes: bool,
-        #[arg(long, value_name = "REV", help = "作業中のファイルではなく、Gitのこのコミットに入っている内容を使う")]
+        #[arg(
+            long,
+            value_name = "REV",
+            help = "作業中のファイルではなく、Gitのこのコミットに入っている内容を使う"
+        )]
         git: Option<String>,
         #[arg(long, help = "設定を登録しない")]
         no_save: bool,
@@ -45,41 +67,63 @@ enum Command {
         replace: bool,
         #[arg(long, help = "今回の非秘密設定とsaltを新規ファイルにエクスポート")]
         export_settings: Option<PathBuf>,
-        #[command(flatten)] output: Output,
+        #[command(flatten)]
+        output: Output,
     },
     #[command(about = "登録済みの設定からパスワードを呼び出す")]
     Get {
         site: String,
-        #[arg(long, default_value = "")] account: String,
-        #[arg(long, help = "省略時は最新の更新番号")] revision: Option<u32>,
-        #[command(flatten)] output: Output,
+        #[arg(long, default_value = "")]
+        account: String,
+        #[arg(long, help = "省略時は最新の更新番号")]
+        revision: Option<u32>,
+        #[command(flatten)]
+        output: Output,
     },
     #[command(about = "バックアップ済みの設定エントリからパスワードを再生成")]
     Regenerate {
         source: PathBuf,
-        #[arg(long, help = "profile list で表示される番号")] entry: usize,
-        #[command(flatten)] output: Output,
+        #[arg(long, help = "profile list で表示される番号")]
+        entry: usize,
+        #[command(flatten)]
+        output: Output,
     },
-    Profile { #[command(subcommand)] command: ProfileCommand },
+    Profile {
+        #[command(subcommand)]
+        command: ProfileCommand,
+    },
 }
 
 #[derive(Subcommand)]
 enum ProfileCommand {
-    Export { #[arg(long)] output: PathBuf },
-    Import { input: PathBuf },
+    Export {
+        #[arg(long)]
+        output: PathBuf,
+    },
+    Import {
+        input: PathBuf,
+    },
     #[command(about = "保存済みの設定エントリを一覧表示")]
     List,
     #[command(about = "設定エントリを削除（そのパスワードは get で呼び出せなくなる）")]
-    Remove { entry: usize },
+    Remove {
+        entry: usize,
+    },
 }
 
 fn run() -> Result<()> {
     let cli = Cli::parse();
-    let path = match cli.config { Some(p) => p, None => profile::default_path()? };
+    let path = match cli.config {
+        Some(p) => p,
+        None => profile::default_path()?,
+    };
     match cli.command {
         Command::Init => {
             profile::save_new(&path, &profile::Profile::new()?)?;
-            eprintln!("初期設定を作成しました: {}\nprofile exportでsaltをバックアップしてください。", path.display());
+            eprintln!(
+                "初期設定を作成しました: {}\nprofile exportでsaltをバックアップしてください。",
+                path.display()
+            );
         }
         Command::Profile { command } => match command {
             ProfileCommand::Export { output } => {
@@ -98,13 +142,28 @@ fn run() -> Result<()> {
                         (Some(p), None) => p.clone(),
                         _ => format!("コード{}", &e.source_sha256[..16]),
                     };
-                    println!("{}\t{}\t{}\t長さ{} {:?} 更新{} v{}\t{}", i + 1, s.site, s.account,
-                        s.length, s.charset, s.revision, s.spec_version, from);
+                    let chars = match (&s.charset, &s.symbols) {
+                        (Charset::Strong, Some(sym)) => format!("記号{sym}"),
+                        (c, _) => format!("{c:?}"),
+                    };
+                    println!(
+                        "{}\t{}\t{}\t長さ{} {} 更新{} v{}\t{}",
+                        i + 1,
+                        s.site_key(),
+                        s.account,
+                        s.length,
+                        chars,
+                        s.revision,
+                        s.spec_version,
+                        from
+                    );
                 }
             }
             ProfileCommand::Remove { entry } => {
                 let removed = profile::update(&path, |p| {
-                    let i = entry.checked_sub(1).filter(|&i| i < p.entries.len())
+                    let i = entry
+                        .checked_sub(1)
+                        .filter(|&i| i < p.entries.len())
                         .ok_or("指定された番号の設定エントリがありません")?;
                     Ok(p.entries.remove(i))
                 })?;
@@ -114,60 +173,124 @@ fn run() -> Result<()> {
         Command::Get { site, account, revision, output } => {
             let p = profile::load(&path)?;
             let e = p.find(&site, &account, revision)?;
-            let file = e.source_path.as_ref()
+            let file = e
+                .source_path
+                .as_ref()
                 .ok_or("この設定にはファイルの場所が記録されていません。regenerate を使ってください")?;
             let loaded = source::load(file.as_ref(), e.git_commit.as_deref())?;
             if !hex::encode(loaded.sha256).eq_ignore_ascii_case(&e.source_sha256) {
-                return Err(format!("{file} の内容が登録時と変わっています（1バイトでも違うと別のパスワードになります）。\
-                    元の内容に戻すか、次からは --git でコミットを指定して登録してください"));
+                return Err(format!(
+                    "{file} の内容が登録時と変わっています（1バイトでも違うと別のパスワードになります）。\
+                    元の内容に戻すか、次からは --git でコミットを指定して登録してください"
+                ));
             }
             let password = prompt_and_derive(&p, &loaded.sha256, &e.settings)?;
             present(&password, e.settings.length, &output)?;
         }
         Command::Regenerate { source, entry, output } => {
             let p = profile::load(&path)?;
-            let e = entry.checked_sub(1).and_then(|i| p.entries.get(i))
+            let e = entry
+                .checked_sub(1)
+                .and_then(|i| p.entries.get(i))
                 .ok_or("指定された番号の設定エントリがありません")?;
             let loaded = source::load(&source, e.git_commit.as_deref())?;
             if !hex::encode(loaded.sha256).eq_ignore_ascii_case(&e.source_sha256) {
-                return Err("ソースコードの内容が保存時と一致しません（1バイトでも違うと別のパスワードになります）".into());
+                return Err(
+                    "ソースコードの内容が保存時と一致しません（1バイトでも違うと別のパスワードになります）"
+                        .into(),
+                );
             }
             let password = prompt_and_derive(&p, &loaded.sha256, &e.settings)?;
             present(&password, e.settings.length, &output)?;
         }
-        Command::Generate { source, site, account, length, charset, revision, spec_version,
-            no_require_classes, git, no_save, replace, export_settings, output } => {
-            let settings = Settings { site, account, length, charset, revision,
-                require_classes: !no_require_classes, spec_version };
+        Command::Generate {
+            source,
+            site,
+            account,
+            length,
+            charset,
+            revision,
+            spec_version,
+            symbols,
+            no_require_classes,
+            git,
+            no_save,
+            replace,
+            export_settings,
+            output,
+        } => {
+            let symbols = symbols.as_deref().map(crypto::canonical_symbols).transpose()?;
+            let settings = Settings {
+                site,
+                account,
+                length,
+                charset,
+                revision,
+                require_classes: !no_require_classes,
+                spec_version,
+                symbols,
+            };
             settings.validate()?;
+            if settings.site_key() != settings.site.trim() {
+                eprintln!(
+                    "サービス: {}（「{}」をこの名前として扱います）",
+                    settings.site_key(),
+                    settings.site
+                );
+            }
             let mut p = profile::load(&path)?;
             let loaded = source::load(&source, git.as_deref())?;
             let source_path = loaded.path.to_str().map(str::to_string);
-            if source_path.is_none() && !no_save { eprintln!("警告: パスがUTF-8でないため、ファイルの場所は記録しません"); }
-            let entry = Entry { source_sha256: hex::encode(loaded.sha256), settings: settings.clone(),
-                source_path, git_commit: loaded.git_commit.clone() };
+            if source_path.is_none() && !no_save {
+                eprintln!("警告: パスがUTF-8でないため、ファイルの場所は記録しません");
+            }
+            let entry = Entry {
+                source_sha256: hex::encode(loaded.sha256),
+                settings: settings.clone(),
+                source_path,
+                git_commit: loaded.git_commit.clone(),
+            };
             // Check before asking for the secret: a mismatch usually means the file changed.
             if !no_save && !replace {
-                if let Some(old) = p.entries.iter().find(|e| e.same_key(&settings) && !e.same_password(&entry)) {
+                if let Some(old) =
+                    p.entries.iter().find(|e| e.same_key(&settings) && !e.same_password(&entry))
+                {
                     let why = if old.source_sha256.eq_ignore_ascii_case(&entry.source_sha256) {
                         "文字数や文字種の設定"
-                    } else { "コードの内容" };
+                    } else {
+                        "コードの内容"
+                    };
                     return Err(format!(
                         "{}（更新番号{}）は登録済みですが、{}が違うので別のパスワードになります。\n  \
                         登録済みのものを出す: codepass get {}{}\n  \
                         パスワードを更新する: --revision {} を付ける\n  \
                         登録を置き換える: --replace / 登録せずに出す: --no-save",
-                        settings.site, revision, why, settings.site,
-                        if settings.account.is_empty() { String::new() } else { format!(" --account {}", settings.account) },
-                        p.entries.iter().filter(|e| crypto::normalize(&e.settings.site) == crypto::normalize(&settings.site)
-                            && crypto::normalize(&e.settings.account) == crypto::normalize(&settings.account))
-                            .map(|e| e.settings.revision).max().unwrap_or(revision).saturating_add(1)));
+                        settings.site_key(),
+                        revision,
+                        why,
+                        settings.site_key(),
+                        if settings.account.is_empty() {
+                            String::new()
+                        } else {
+                            format!(" --account {}", settings.account)
+                        },
+                        p.entries
+                            .iter()
+                            .filter(|e| e.same_service(&settings))
+                            .map(|e| e.settings.revision)
+                            .max()
+                            .unwrap_or(revision)
+                            .saturating_add(1)
+                    ));
                 }
             }
             let password = prompt_and_derive(&p, &loaded.sha256, &settings)?;
             if !no_save {
                 match profile::update(&path, |p| Ok(p.upsert(entry.clone(), replace)))? {
-                    Saved::Added => eprintln!("設定を登録しました。次からは codepass get {} で呼び出せます", settings.site),
+                    Saved::Added => eprintln!(
+                        "設定を登録しました。次からは codepass get {} で呼び出せます",
+                        settings.site_key()
+                    ),
                     Saved::Replaced => eprintln!("登録済みの設定を置き換えました"),
                     Saved::Unchanged => {}
                     Saved::Conflict => eprintln!("警告: 登録済みの設定と違うため、登録しませんでした"),
@@ -184,24 +307,47 @@ fn run() -> Result<()> {
     Ok(())
 }
 
-fn prompt_and_derive(p: &profile::Profile, hash: &[u8; 32], settings: &Settings) -> Result<Zeroizing<String>> {
+fn prompt_and_derive(
+    p: &profile::Profile,
+    hash: &[u8; 32],
+    settings: &Settings,
+) -> Result<Zeroizing<String>> {
     settings.validate()?;
-    if !io::stdin().is_terminal() { return Err("マスターシークレットは対話端末から入力してください".into()); }
-    if settings.length < 15 { eprintln!("警告: 15文字未満です。20文字以上を推奨します。"); }
-    let secret = Zeroizing::new(rpassword::prompt_password("Master secret: ")
-        .map_err(|_| "非表示入力に失敗しました")?);
+    if !io::stdin().is_terminal() {
+        return Err("マスターシークレットは対話端末から入力してください".into());
+    }
+    if settings.length < 15 {
+        eprintln!("警告: 15文字未満です。20文字以上を推奨します。");
+    }
+    let secret = Zeroizing::new(
+        rpassword::prompt_password("Master secret: ").map_err(|_| "非表示入力に失敗しました")?,
+    );
     let master = crypto::master_key(&secret, &p.salt_bytes()?)?;
+    if let Some(warning) = crypto::secret_warning(&secret, &["codepass", &settings.site, &settings.account]) {
+        eprintln!("{warning}");
+    }
     eprintln!("確認コード: {}（いつもと違えば打ち間違いです）", crypto::check_code(&master)?);
     let password = crypto::derive_with_master(&master, hash, settings)?;
-    eprintln!("仕様: v{} / コードSHA-256: {} / 更新番号: {}", settings.spec_version, hex::encode(hash), settings.revision);
+    eprintln!(
+        "仕様: v{} / コードSHA-256: {} / 更新番号: {}",
+        settings.spec_version,
+        hex::encode(hash),
+        settings.revision
+    );
     Ok(password)
 }
 
 fn present(password: &str, length: usize, output: &Output) -> Result<()> {
-    if output.copy { return copy_to_clipboard(password, output.clear_after); }
-    if output.reveal { return print_password(password); }
+    if output.copy {
+        return copy_to_clipboard(password, output.clear_after);
+    }
+    if output.reveal {
+        return print_password(password);
+    }
     eprintln!("生成結果: {}", "*".repeat(length));
-    if !io::stdout().is_terminal() { return Ok(()); }
+    if !io::stdout().is_terminal() {
+        return Ok(());
+    }
     eprint!("表示するには reveal、コピーするには copy と入力してください: ");
     io::stderr().flush().map_err(|_| "端末への出力に失敗しました")?;
     let mut answer = String::new();
@@ -214,13 +360,17 @@ fn present(password: &str, length: usize, output: &Output) -> Result<()> {
 }
 
 fn print_password(password: &str) -> Result<()> {
-    let stdout = io::stdout(); let mut out = stdout.lock();
+    let stdout = io::stdout();
+    let mut out = stdout.lock();
     writeln!(out, "{}", password).map_err(|_| "生成結果の出力に失敗しました".into())
 }
 
-#[cfg(target_os = "macos")] use arboard::SetExtApple as _;
-#[cfg(windows)] use arboard::SetExtWindows as _;
-#[cfg(all(unix, not(target_os = "macos")))] use arboard::SetExtLinux as _;
+#[cfg(target_os = "macos")]
+use arboard::SetExtApple as _;
+#[cfg(all(unix, not(target_os = "macos")))]
+use arboard::SetExtLinux as _;
+#[cfg(windows)]
+use arboard::SetExtWindows as _;
 
 // Stays running until the timeout: on Linux the clipboard content lives in this process.
 fn copy_to_clipboard(password: &str, clear_after: u64) -> Result<()> {
@@ -229,10 +379,16 @@ fn copy_to_clipboard(password: &str, clear_after: u64) -> Result<()> {
     eprintln!("クリップボードにコピーしました。{clear_after}秒後に消去します（Enterですぐ消去）");
     let (tx, rx) = mpsc::channel();
     let on_interrupt = tx.clone();
-    ctrlc::set_handler(move || { let _ = on_interrupt.send(()); })
-        .map_err(|_| "Ctrl+C の処理を設定できません")?;
+    ctrlc::set_handler(move || {
+        let _ = on_interrupt.send(());
+    })
+    .map_err(|_| "Ctrl+C の処理を設定できません")?;
     if io::stdin().is_terminal() {
-        std::thread::spawn(move || { let mut line = String::new(); let _ = io::stdin().read_line(&mut line); let _ = tx.send(()); });
+        std::thread::spawn(move || {
+            let mut line = String::new();
+            let _ = io::stdin().read_line(&mut line);
+            let _ = tx.send(());
+        });
     }
     let _ = rx.recv_timeout(Duration::from_secs(clear_after));
     // Only clear if it is still ours, so something the user copied meanwhile survives.
@@ -248,5 +404,8 @@ fn copy_to_clipboard(password: &str, clear_after: u64) -> Result<()> {
 }
 
 fn main() {
-    if let Err(message) = run() { eprintln!("codepass: {}", message); std::process::exit(1); }
+    if let Err(message) = run() {
+        eprintln!("codepass: {}", message);
+        std::process::exit(1);
+    }
 }
