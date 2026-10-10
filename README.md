@@ -111,6 +111,49 @@ SHA-256（コード）→ Argon2id（マスターシークレット, 64MiB / 3�
 [tests/vectors.rs](tests/vectors.rs) のテストベクターと一致することを、CIで毎回確かめています。
 文字の偏りがないことの統計的な検定や、ランダムな入力に対する性質テスト（proptest）も入っています。
 
+## 使用技術
+
+**言語**: Rust（2021 edition）。外部との通信は一切なく、オフラインで動きます。
+
+### 暗号
+
+独自の暗号は作らず、広く使われている [RustCrypto](https://github.com/RustCrypto) の実装を組み合わせています。
+
+| 用途 | 方式 | ライブラリ |
+|---|---|---|
+| コードのハッシュ | SHA-256 | [`sha2`](https://crates.io/crates/sha2) |
+| マスターシークレットからの鍵導出 | Argon2id（64MiB / 3回 / 並列度1） | [`argon2`](https://crates.io/crates/argon2) |
+| サービスごとの鍵の導出・確認コード | HKDF-SHA256 | [`hkdf`](https://crates.io/crates/hkdf) |
+| 文字列生成のための乱数列 | HMAC-SHA256 | [`hmac`](https://crates.io/crates/hmac) |
+| salt の生成 | OS の安全な乱数 | [`getrandom`](https://crates.io/crates/getrandom) |
+| 使い終わった秘密情報の消去 | メモリのゼロ埋め | [`zeroize`](https://crates.io/crates/zeroize) |
+
+### CLI・入出力
+
+| 用途 | ライブラリ |
+|---|---|
+| コマンドと引数の解析 | [`clap`](https://crates.io/crates/clap) |
+| 画面に出さないシークレット入力 | [`rpassword`](https://crates.io/crates/rpassword) |
+| クリップボード（履歴除外つき） | [`arboard`](https://crates.io/crates/arboard) |
+| Ctrl+C でもクリップボードを消す | [`ctrlc`](https://crates.io/crates/ctrlc) |
+| シークレットの推測されやすさの判定 | [`zxcvbn`](https://crates.io/crates/zxcvbn) |
+| サービス名・アカウント名の Unicode 正規化（NFC / NFKC） | [`unicode-normalization`](https://crates.io/crates/unicode-normalization) |
+| 設定ファイル（JSON）の読み書き | [`serde`](https://crates.io/crates/serde) / [`serde_json`](https://crates.io/crates/serde_json) / [`hex`](https://crates.io/crates/hex) |
+| OS ごとの設定ファイルの置き場所 | [`directories`](https://crates.io/crates/directories) |
+| コミットからのファイル読み込み | `git` コマンド（`rev-parse` / `cat-file` のみ） |
+
+### テスト・品質管理
+
+| 内容 | 使っているもの |
+|---|---|
+| 単体・結合テスト、テストベクター | Rust 標準のテスト、[`tempfile`](https://crates.io/crates/tempfile) |
+| ランダムな入力での性質テスト | [`proptest`](https://crates.io/crates/proptest) |
+| 仕様だけから書いた別実装との突き合わせ | Python 3 ＋ [`argon2-cffi`](https://pypi.org/project/argon2-cffi/)（[docs/reference.py](docs/reference.py)） |
+| 整形・静的解析 | rustfmt / Clippy |
+| 依存ライブラリの脆弱性検査 | [RustSec](https://rustsec.org/)（`rustsec/audit-check`） |
+| CI（Linux / macOS / Windows） | GitHub Actions |
+| 配布（5種類の実行ファイルと `SHA256SUMS`） | GitHub Actions ＋ GitHub Releases |
+
 ## 開発
 
 ```sh
