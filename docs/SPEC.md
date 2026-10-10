@@ -65,9 +65,27 @@ SYMBOLS = !#$%&()*+,-./:;<=>?@[]^_{|}~      (strong のみ。28文字。" ' ` \ 
 
 候補の試行は 1,000,000 回で打ち切ってエラーにする（実際には到達しない）。
 
+## 確認コード
+
+マスターシークレットの打ち間違いに気づくための3単語。`salt` と `secret` だけで決まり、どこにも保存しない。
+
+```
+code = HKDF-SHA256(salt = "CodePass/HKDF/v1", ikm = master, info = "CodePass/check-code/v1", L = 3)
+check_code = WORDS[code[0]] + "-" + WORDS[code[1]] + "-" + WORDS[code[2]]
+```
+
+`WORDS` は `src/words.rs` の256語（並び順も仕様の一部）。24ビットしかないため、総当たりの手がかりとしては
+生成済みパスワード1つよりはるかに弱い。
+
+## Gitからの読み込み
+
+`--git REV` を付けると、作業中のファイルではなくコミットに入っている内容（`git cat-file blob <commit>:./<file>`
+の出力）を `source` として使う。Gitの改行コード変換やファイルの編集の影響を受けない。
+登録時は `REV` を完全なコミットID（40または64桁の16進）に解決して保存する。
+
 ## テストベクター
 
-`tests/vectors.rs` に固定入力と期待される出力を置いている。別実装はこれと一致することを確認すること。
+`tests/vectors.rs` に固定入力と期待される出力（パスワード4件と確認コード）を置いている。別実装はこれと一致することを確認すること。
 
 ## プロファイル（バックアップ）形式
 
@@ -75,17 +93,22 @@ SYMBOLS = !#$%&()*+,-./:;<=>?@[]^_{|}~      (strong のみ。28文字。" ' ` \ 
 
 ```json
 {
-  "format_version": 1,
+  "format_version": 2,
   "spec_version": 1,
   "salt": "<16バイトの16進>",
   "entries": [
     {
       "source_sha256": "<32バイトの16進>",
       "settings": { "site": "github.com", "account": "", "length": 24, "charset": "strong",
-                    "revision": 1, "require_classes": true, "spec_version": 1 }
+                    "revision": 1, "require_classes": true, "spec_version": 1 },
+      "source_path": "/Users/me/keys/main.py",
+      "git_commit": "<コミットID。Gitから読んだときだけ>"
     }
   ]
 }
 ```
 
-既存のプロファイルは上書きしない（salt が変わると全パスワードを再生成できなくなるため）。
+- `format_version` 1 は `source_path` / `git_commit` を持たない旧形式。どちらも読み込める。
+- エントリは「サービス・アカウント・更新番号」で区別する。同じ組み合わせで内容が違う登録は、明示しない限り置き換えない。
+- `init` / `profile export` / `profile import` は既存ファイルを上書きしない。登録の追加・削除は一時ファイルに書いてから
+  置き換え、その前後で salt が変わっていないことを確かめる（salt が変わると全パスワードを再生成できなくなるため）。

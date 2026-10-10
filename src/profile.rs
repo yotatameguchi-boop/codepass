@@ -1,4 +1,4 @@
-use crate::{crypto::Settings, Result};
+use crate::{crypto::{normalize, Settings}, Result};
 use serde::{Deserialize, Serialize};
 use std::{fs::{self, OpenOptions}, io::{Read, Write}, path::{Path, PathBuf}};
 
@@ -16,26 +16,93 @@ pub struct Profile {
 pub struct Entry {
     pub source_sha256: String,
     pub settings: Settings,
+    /// Where the code was read from (format 2+). Lets `get` find it again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_path: Option<String>,
+    /// Full commit hash when the code was read from Git (format 2+).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_commit: Option<String>,
 }
+
+impl Entry {
+    /// Entries are identified by site, account and revision, so old revisions stay recoverable.
+    pub fn same_key(&self, other: &Settings) -> bool {
+        let s = &self.settings;
+        normalize(&s.site) == normalize(&other.site) && normalize(&s.account) == normalize(&other.account)
+            && s.revision == other.revision
+    }
+    pub fn same_password(&self, other: &Entry) -> bool {
+        let (a, b) = (&self.settings, &other.settings);
+        self.same_key(b) && self.source_sha256.eq_ignore_ascii_case(&other.source_sha256)
+            && a.length == b.length && a.charset == b.charset && a.require_classes == b.require_classes
+            && a.spec_version == b.spec_version
+    }
+}
+
+pub enum Saved { Added, Unchanged, Replaced, Conflict }
 
 impl Profile {
     pub fn new() -> Result<Self> {
         let mut salt = [0u8; 16];
         getrandom::getrandom(&mut salt).map_err(|_| "安全な乱数を取得できません")?;
-        Ok(Self { format_version: 1, spec_version: 1, salt: hex::encode(salt), entries: vec![] })
+        Ok(Self { format_version: 2, spec_version: 1, salt: hex::encode(salt), entries: vec![] })
     }
     pub fn salt_bytes(&self) -> Result<[u8; 16]> {
         let bytes = hex::decode(&self.salt).map_err(|_| "saltの形式が不正です")?;
         bytes.try_into().map_err(|_| "saltは16バイトである必要があります".into())
     }
+    /// Adds or updates an entry. A different password under the same key is never
+    /// overwritten unless `replace` is set, because the old one would be lost.
+    pub fn upsert(&mut self, entry: Entry, replace: bool) -> Saved {
+        match self.entries.iter_mut().find(|e| e.same_key(&entry.settings)) {
+            None => { self.entries.push(entry); Saved::Added }
+            Some(e) if e.same_password(&entry) => {
+                if e.source_path.is_none() || entry.git_commit.is_some() { *e = entry; }
+                Saved::Unchanged
+            }
+            Some(e) if replace => { *e = entry; Saved::Replaced }
+            Some(_) => Saved::Conflict,
+        }
+    }
+
+    /// Picks the entry for a site/account: the given revision, or the newest one.
+    pub fn find(&self, site: &str, account: &str, revision: Option<u32>) -> Result<&Entry> {
+        let (site, account) = (normalize(site), normalize(account));
+        let mut matches: Vec<&Entry> = self.entries.iter()
+            .filter(|e| normalize(&e.settings.site) == site).collect();
+        if matches.is_empty() { return Err(format!("{site} の設定は登録されていません。先に generate してください")); }
+        let accounts: Vec<String> = matches.iter().map(|e| e.settings.account.clone()).collect();
+        matches.retain(|e| normalize(&e.settings.account) == account);
+        if matches.is_empty() {
+            let mut names: Vec<String> = accounts.into_iter()
+                .map(|a| if a.is_empty() { "（なし）".into() } else { a }).collect();
+            names.sort(); names.dedup();
+            return Err(format!("アカウント「{account}」の設定はありません。登録済み: {}", names.join(", ")));
+        }
+        match revision {
+            Some(r) => matches.into_iter().find(|e| e.settings.revision == r)
+                .ok_or_else(|| format!("更新番号 {r} の設定はありません")),
+            None => Ok(matches.into_iter().max_by_key(|e| e.settings.revision).expect("non-empty")),
+        }
+    }
+
     pub fn validate(&self) -> Result<()> {
-        if self.format_version != 1 || self.spec_version != 1 { return Err("未対応のプロファイルバージョンです".into()); }
+        if !(1..=2).contains(&self.format_version) || self.spec_version != 1 {
+            return Err("未対応のプロファイルバージョンです。codepass を更新してください".into());
+        }
         self.salt_bytes()?;
         if self.entries.len() > 10000 { return Err("設定の件数が上限を超えています".into()); }
         for entry in &self.entries {
             entry.settings.validate()?;
             if hex::decode(&entry.source_sha256).map_err(|_| "コードハッシュが不正です")?.len() != 32 {
                 return Err("コードハッシュは32バイトである必要があります".into());
+            }
+            if entry.source_path.as_ref().is_some_and(|p| p.len() > 4096 || p.chars().any(char::is_control)) {
+                return Err("ソースファイルのパスが不正です".into());
+            }
+            if entry.git_commit.as_ref().is_some_and(|c| !(c.len() == 40 || c.len() == 64)
+                || !c.bytes().all(|b| b.is_ascii_hexdigit())) {
+                return Err("GitのコミットIDが不正です".into());
             }
         }
         Ok(())
@@ -75,6 +142,28 @@ pub fn save_new(path: &Path, profile: &Profile) -> Result<()> {
     file.write_all(&bytes).and_then(|_| file.sync_all()).map_err(|_| "設定の保存に失敗しました".into())
 }
 
+/// Rewrites an existing profile in place. The salt can never change here, and the
+/// file is replaced atomically so a crash leaves either the old or the new version.
+pub fn update<T>(path: &Path, f: impl FnOnce(&mut Profile) -> Result<T>) -> Result<T> {
+    let mut profile = load(path)?;
+    let salt = profile.salt.clone();
+    let out = f(&mut profile)?;
+    if profile.salt != salt { return Err("saltは変更できません".into()); }
+    profile.format_version = 2;
+    let mut nonce = [0u8; 8];
+    getrandom::getrandom(&mut nonce).map_err(|_| "安全な乱数を取得できません")?;
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(format!(".{}.tmp", hex::encode(nonce)));
+    let tmp = PathBuf::from(tmp);
+    save_new(&tmp, &profile)?;
+    let result = (|| {
+        if load(path)?.salt != salt { return Err("設定ファイルが別の処理で書き換えられました".to_string()); }
+        fs::rename(&tmp, path).map_err(|_| "設定の保存に失敗しました".to_string())
+    })();
+    if result.is_err() { let _ = fs::remove_file(&tmp); }
+    result.map(|_| out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -86,5 +175,30 @@ mod tests {
         assert!(save_new(&path, &Profile::new().unwrap()).is_err());
         let bytes = fs::read_to_string(path).unwrap();
         assert!(!bytes.contains("secret")); assert!(!bytes.contains("password"));
+    }
+
+    fn entry(site: &str, revision: u32, hash: u8) -> Entry {
+        Entry { source_sha256: hex::encode([hash; 32]), source_path: Some("/x/main.rs".into()), git_commit: None,
+            settings: Settings { site: site.into(), account: "".into(), length: 24,
+                charset: crate::crypto::Charset::Strong, revision, require_classes: true, spec_version: 1 } }
+    }
+
+    #[test]
+    fn update_keeps_salt_and_never_silently_replaces() {
+        let dir = tempfile::tempdir().unwrap(); let path = dir.path().join("profile.json");
+        let p = Profile::new().unwrap(); save_new(&path, &p).unwrap();
+        assert!(matches!(update(&path, |p| Ok(p.upsert(entry("github.com", 1, 1), false))).unwrap(), Saved::Added));
+        assert!(matches!(update(&path, |p| Ok(p.upsert(entry("github.com", 1, 1), false))).unwrap(), Saved::Unchanged));
+        assert!(matches!(update(&path, |p| Ok(p.upsert(entry("github.com", 1, 2), false))).unwrap(), Saved::Conflict));
+        assert!(matches!(update(&path, |p| Ok(p.upsert(entry("github.com", 2, 2), false))).unwrap(), Saved::Added));
+        assert!(update(&path, |p| { p.salt = "00".repeat(16); Ok(()) }).is_err());
+        let loaded = load(&path).unwrap();
+        assert_eq!(loaded.salt, p.salt);
+        assert_eq!(loaded.entries[0].source_sha256, hex::encode([1u8; 32]));
+        assert_eq!(loaded.find("github.com", "", None).unwrap().settings.revision, 2);
+        assert_eq!(loaded.find("github.com", "", Some(1)).unwrap().settings.revision, 1);
+        assert!(loaded.find("example.com", "", None).is_err());
+        assert!(loaded.find("github.com", "work", None).is_err());
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1, "no temp files left behind");
     }
 }

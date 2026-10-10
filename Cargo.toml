@@ -6,8 +6,10 @@ license = "MIT"
 description = "Offline, deterministic passwords from source code and a master secret"
 
 [dependencies]
+arboard = { version = "3.6", default-features = false }
 argon2 = "0.5"
 clap = { version = "4.5", features = ["derive"] }
+ctrlc = "3.5.2"
 directories = "6"
 getrandom = "0.2"
 hex = "0.4"

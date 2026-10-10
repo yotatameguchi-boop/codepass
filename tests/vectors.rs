@@ -33,3 +33,11 @@ fn nfc_equivalent_identifiers_match() {
     let decomposed = settings("cafe\u{301}.example", "", 24, Charset::Strong, 1, true);
     assert_eq!(*derive(SECRET, &SALT, &hash, &composed).unwrap(), *derive(SECRET, &SALT, &hash, &decomposed).unwrap());
 }
+
+#[test]
+fn check_code_vector() {
+    let master = codepass::crypto::master_key(SECRET, &SALT).unwrap();
+    assert_eq!(codepass::crypto::check_code(&master).unwrap(), "fountain-basil-oyster");
+    let typo = codepass::crypto::master_key("correct horse battery staple 2025", &SALT).unwrap();
+    assert_ne!(codepass::crypto::check_code(&typo).unwrap(), "fountain-basil-oyster");
+}

@@ -58,12 +58,23 @@ pub fn validate_secret(secret: &str) -> Result<()> {
 pub fn derive(secret: &str, salt: &[u8; 16], code_hash: &[u8; 32], settings: &Settings)
     -> Result<Zeroizing<String>> {
     settings.validate()?;
+    derive_with_master(&*master_key(secret, salt)?, code_hash, settings)
+}
+
+/// The slow, secret-dependent step. Run once per session and reuse for every site.
+pub fn master_key(secret: &str, salt: &[u8; 16]) -> Result<Zeroizing<[u8; 32]>> {
     validate_secret(secret)?;
     let params = Params::new(65536, 3, 1, Some(32)).map_err(|_| "Argon2設定エラー")?;
     let mut master = Zeroizing::new([0u8; 32]);
     Argon2::new(Algorithm::Argon2id, Version::V0x13, params)
         .hash_password_into(secret.as_bytes(), salt, &mut *master)
         .map_err(|_| "鍵導出に失敗しました")?;
+    Ok(master)
+}
+
+pub fn derive_with_master(master: &[u8; 32], code_hash: &[u8; 32], settings: &Settings)
+    -> Result<Zeroizing<String>> {
+    settings.validate()?;
     let mut context = b"CodePass/context/v1\0".to_vec();
     context.extend_from_slice(code_hash);
     for s in [normalize(&settings.site), normalize(&settings.account)] {
@@ -75,9 +86,18 @@ pub fn derive(secret: &str, salt: &[u8; 16], code_hash: &[u8; 32], settings: &Se
     context.push(match settings.charset { Charset::Strong => 1, Charset::Alnum => 2 });
     context.push(u8::from(settings.require_classes));
     let mut key = Zeroizing::new([0u8; 32]);
-    Hkdf::<Sha256>::new(Some(b"CodePass/HKDF/v1"), &*master)
-        .expand(&context, &mut *key).map_err(|_| "HKDF処理に失敗しました")?;
+    Hkdf::<Sha256>::new(Some(b"CodePass/HKDF/v1"), master)
+        .expand(&context, &mut key[..]).map_err(|_| "HKDF処理に失敗しました")?;
     render(&key, settings)
+}
+
+/// Three words that depend only on the secret and salt, so a typo shows up as
+/// unfamiliar words. Never stored; 24 bits are far weaker than any generated password.
+pub fn check_code(master: &[u8; 32]) -> Result<String> {
+    let mut out = [0u8; 3];
+    Hkdf::<Sha256>::new(Some(b"CodePass/HKDF/v1"), master)
+        .expand(b"CodePass/check-code/v1", &mut out).map_err(|_| "HKDF処理に失敗しました")?;
+    Ok(out.iter().map(|&b| crate::words::WORDS[b as usize]).collect::<Vec<_>>().join("-"))
 }
 
 fn render(key: &[u8; 32], settings: &Settings) -> Result<Zeroizing<String>> {
@@ -155,5 +175,11 @@ mod tests {
         assert!(validate_secret("short").is_err());
         let mut s = settings(); s.spec_version = 2; assert!(s.validate().is_err());
         s.spec_version = 1; s.length = 7; assert!(s.validate().is_err());
+    }
+    #[test]
+    fn check_code_words_are_distinct() {
+        let mut words = crate::words::WORDS.to_vec(); words.sort(); words.dedup();
+        assert_eq!(words.len(), 256);
+        assert_ne!(check_code(&[1; 32]).unwrap(), check_code(&[2; 32]).unwrap());
     }
 }
