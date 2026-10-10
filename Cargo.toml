@@ -1,0 +1,25 @@
+[package]
+name = "codepass"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Offline, deterministic passwords from source code and a master secret"
+
+[dependencies]
+argon2 = "0.5"
+clap = { version = "4.5", features = ["derive"] }
+directories = "6"
+getrandom = "0.2"
+hex = "0.4"
+hkdf = "0.12"
+hmac = "0.12"
+rpassword = "7"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+unicode-normalization = "0.1"
+zeroize = "1"
+
+[dev-dependencies]
+tempfile = "3"
+
