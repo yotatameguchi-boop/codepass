@@ -72,7 +72,7 @@ pub fn save_new(path: &Path, profile: &Profile) -> Result<()> {
         options.mode(0o600);
     }
     let mut file = options.open(path).map_err(|_| "ファイルを新規作成できません。既存の設定は上書きしません")?;
-    file.write_all(&bytes).and_then(|_| file.sync_all()).map_err(|_| "設定の保存に失敗しました")
+    file.write_all(&bytes).and_then(|_| file.sync_all()).map_err(|_| "設定の保存に失敗しました".into())
 }
 
 #[cfg(test)]
