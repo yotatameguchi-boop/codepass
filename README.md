@@ -14,10 +14,10 @@
 [Releases](https://github.com/yotatameguchi-boop/codepass/releases) から、macOS（Apple Silicon / Intel）・Linux（x86_64 / ARM64）・Windows 向けの
 実行ファイルを入手できます。`SHA256SUMS` でファイルが壊れていないか確かめてください。
 
-Rust がある場合はソースからも入れられます。
+Rust がある場合は [crates.io](https://crates.io/crates/codepass) から入れられます。
 
 ```sh
-cargo install --locked --git https://github.com/yotatameguchi-boop/codepass
+cargo install --locked codepass
 ```
 
 ## 使い方
