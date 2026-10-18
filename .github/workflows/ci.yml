@@ -52,6 +52,12 @@ jobs:
           targets: wasm32-unknown-unknown
           components: clippy
       - run: cargo clippy --locked -p codepass-web --target wasm32-unknown-unknown -- -D warnings
+      - name: Build the web demo and the extension
+        run: |
+          version=$(grep -A1 'name = "wasm-bindgen"$' Cargo.lock | sed -n 's/version = "\(.*\)"/\1/p' | head -1)
+          cargo install --locked wasm-bindgen-cli --version "$version"
+          ./scripts/build-web.sh
+          python3 -c "import json; m = json.load(open('extension/manifest.json')); assert m['manifest_version'] == 3; assert set(m['permissions']) == {'activeTab', 'scripting', 'storage'}, m['permissions']; assert 'host_permissions' not in m"
   reference:
     # The Python implementation is written from docs/SPEC.md alone; it must keep matching.
     runs-on: ubuntu-latest

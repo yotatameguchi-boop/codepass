@@ -1,0 +1,18 @@
+{
+  "manifest_version": 3,
+  "name": "CodePass",
+  "version": "0.4.0",
+  "description": "ソースコードから同じパスワードを作り直す CodePass のブラウザ拡張。開いているページの本当のドメインで判定し、そっくりな偽ドメインには入力しません。",
+  "minimum_chrome_version": "116",
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "CodePass",
+    "default_icon": { "16": "icons/16.png", "32": "icons/32.png", "48": "icons/48.png", "128": "icons/128.png" }
+  },
+  "icons": { "16": "icons/16.png", "32": "icons/32.png", "48": "icons/48.png", "128": "icons/128.png" },
+  "options_page": "options.html",
+  "permissions": ["activeTab", "scripting", "storage"],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'none'; base-uri 'none'; form-action 'none'"
+  }
+}

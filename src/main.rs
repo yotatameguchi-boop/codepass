@@ -102,6 +102,8 @@ enum Command {
     },
     #[command(about = "このマシンで鍵導出の時間を測り、総当たり攻撃にかかる時間の目安を表示する")]
     Bench,
+    #[command(about = "設定を点検し、パスワードを作り直せなくなる原因がないか調べる")]
+    Doctor,
 }
 
 #[derive(Subcommand)]
@@ -129,6 +131,7 @@ fn run() -> Result<()> {
     };
     match cli.command {
         Command::Bench => bench()?,
+        Command::Doctor => doctor(&path)?,
         Command::Init { hardware_key } => {
             let mut p = profile::Profile::new()?;
             if hardware_key {
@@ -142,7 +145,11 @@ fn run() -> Result<()> {
             }
             profile::save_new(&path, &p)?;
             eprintln!(
-                "初期設定を作成しました: {}\nprofile exportでsaltをバックアップしてください。",
+                "初期設定を作成しました: {}\n\n次にやること:\n  \
+                1. saltをバックアップする    codepass profile export --output <別の場所>/codepass-backup.json\n  \
+                2. 材料のファイルをコミットで固定する    git tag codepass-source\n  \
+                3. パスワードを作る    codepass generate <ファイル> --site github.com --git codepass-source\n\n\
+                いつでも codepass doctor で設定を点検できます。",
                 path.display()
             );
         }
@@ -196,7 +203,10 @@ fn run() -> Result<()> {
             let e = match p.find(&site, &account, revision) {
                 Ok(e) => e,
                 Err(not_found) => {
-                    let key = crypto::site_key(&site, crypto::LATEST_SPEC);
+                    let key = crypto::site_key(
+                        &phishing::decode_host(&crypto::site_key(&site, crypto::LATEST_SPEC)),
+                        crypto::LATEST_SPEC,
+                    );
                     let look = phishing::lookalikes(&key, registered_sites(&p).iter().map(String::as_str));
                     if !look.is_empty() {
                         return Err(format!(
@@ -281,11 +291,12 @@ fn run() -> Result<()> {
                 );
             }
             let mut p = profile::load(&path)?;
-            for warning in phishing::suspicious_parts(&settings.site_key()) {
+            // Judge the name as it looks: a pasted Punycode URL is decoded for these checks.
+            let looks_like = phishing::decode_host(&settings.site_key());
+            for warning in phishing::suspicious_parts(&looks_like) {
                 eprintln!("警告: {warning}");
             }
-            let look =
-                phishing::lookalikes(&settings.site_key(), registered_sites(&p).iter().map(String::as_str));
+            let look = phishing::lookalikes(&looks_like, registered_sites(&p).iter().map(String::as_str));
             if !look.is_empty() && !allow_lookalike {
                 return Err(format!(
                     "「{}」は登録済みの「{}」と見た目がそっくりです。フィッシングサイトのURLではないか確かめてください。\n  \
@@ -373,6 +384,149 @@ const GPU_BANDWIDTH_BYTES: f64 = 1.0e12; // a high-end GPU, about 1 TB/s
 const BYTES_PER_GUESS: f64 = 9.0 * 64.0 * 1024.0 * 1024.0;
 const GPUS: f64 = 1000.0;
 const SHA256_PER_GPU: f64 = 1.0e10; // unsalted fast hash, for comparison
+
+/// One line of the doctor's report.
+enum Check {
+    Ok(String),
+    Warn(String, String),
+    Bad(String, String),
+}
+
+fn doctor(path: &std::path::Path) -> Result<()> {
+    let mut checks = Vec::new();
+    let p = match profile::load(path) {
+        Ok(p) => {
+            checks.push(Check::Ok(format!(
+                "設定ファイルを読めます（{}・登録 {} 件）",
+                path.display(),
+                p.entries.len()
+            )));
+            p
+        }
+        Err(e) => {
+            println!(
+                "✗ 設定ファイル: {e}\n  → codepass init で作るか、--config でバックアップを指定してください"
+            );
+            return Ok(());
+        }
+    };
+    checks.push(Check::Warn(
+        "salt のバックアップ".into(),
+        "salt をなくすと全部作り直せません。profile export で別の場所に置いてあるか確かめてください".into(),
+    ));
+
+    match &p.hardware_key {
+        Some(_) if cfg!(feature = "fido2") => {
+            checks.push(Check::Ok("セキュリティキーを使う設定です（このビルドは対応しています）".into()))
+        }
+        Some(_) => checks.push(Check::Bad(
+            "セキュリティキーを使う設定ですが、このビルドは対応していません".into(),
+            "cargo install codepass --features fido2 で入れ直してください".into(),
+        )),
+        None => {}
+    }
+
+    for (i, e) in p.entries.iter().enumerate() {
+        let s = &e.settings;
+        let name = format!(
+            "#{} {}{} 更新{}",
+            i + 1,
+            s.site_key(),
+            if s.account.is_empty() { String::new() } else { format!(" / {}", s.account) },
+            s.revision
+        );
+        let source = match &e.source_path {
+            None => Err("ファイルの場所が記録されていません（regenerate でのみ使えます）".to_string()),
+            Some(file) => {
+                source::load(file.as_ref(), e.git_commit.as_deref()).map_err(|err| format!("{file}: {err}"))
+            }
+        };
+        match source {
+            Ok(loaded) if hex::encode(loaded.sha256).eq_ignore_ascii_case(&e.source_sha256) => {
+                if e.git_commit.is_some() {
+                    checks.push(Check::Ok(format!("{name}: 材料はコミットで固定されています")));
+                } else {
+                    checks.push(Check::Warn(
+                        format!("{name}: 材料が作業中のファイルです"),
+                        "編集すると作り直せなくなります。--git で登録し直すと安全です".into(),
+                    ));
+                }
+            }
+            Ok(_) => checks.push(Check::Bad(
+                format!("{name}: 材料のファイルが登録時と変わっています"),
+                "元に戻すか、--git で固定したコミットを使ってください".into(),
+            )),
+            Err(err) => checks.push(Check::Bad(format!("{name}: 材料を読めません"), err)),
+        }
+        if e.mac.is_none() {
+            checks.push(Check::Warn(
+                format!("{name}: 改ざん検知の署名がありません"),
+                "generate し直すと付きます（v0.2 以前の登録）".into(),
+            ));
+        }
+        if s.spec_version < 2 {
+            checks.push(Check::Warn(
+                format!("{name}: 古い生成仕様 v1 です"),
+                "大文字小文字を区別します。新しい更新番号で作り直すと v2 になります".into(),
+            ));
+        }
+        if s.length < 15 {
+            checks.push(Check::Warn(
+                format!("{name}: {}文字と短めです", s.length),
+                "20文字以上を推奨します".into(),
+            ));
+        }
+    }
+
+    let names = registered_sites(&p);
+    let mut pairs = Vec::new();
+    for (i, a) in names.iter().enumerate() {
+        for b in phishing::lookalikes(a, names[i + 1..].iter().map(String::as_str)) {
+            pairs.push(format!("「{a}」と「{b}」"));
+        }
+    }
+    pairs.sort();
+    pairs.dedup();
+    for pair in pairs {
+        checks.push(Check::Warn(
+            format!("{pair}は見た目がそっくりです"),
+            "片方がフィッシングサイトのものでないか確かめてください".into(),
+        ));
+    }
+
+    let probe = Locked::new([0u8; 32]);
+    if probe.is_locked() {
+        checks.push(Check::Ok("秘密情報をメモリに固定できます（スワップに書き出されません）".into()));
+    } else {
+        checks.push(Check::Warn(
+            "秘密情報をメモリに固定できません".into(),
+            "OS の制限（Windows では未対応）。スワップに書き出される可能性があります".into(),
+        ));
+    }
+
+    let (mut ok, mut warn, mut bad) = (0, 0, 0);
+    for c in &checks {
+        match c {
+            Check::Ok(m) => {
+                ok += 1;
+                println!("✓ {m}");
+            }
+            Check::Warn(m, hint) => {
+                warn += 1;
+                println!("! {m}\n  → {hint}");
+            }
+            Check::Bad(m, hint) => {
+                bad += 1;
+                println!("✗ {m}\n  → {hint}");
+            }
+        }
+    }
+    println!("\n問題なし {ok} 件 / 注意 {warn} 件 / 要対応 {bad} 件");
+    if bad > 0 {
+        return Err("要対応の項目があります".into());
+    }
+    Ok(())
+}
 
 fn bench() -> Result<()> {
     let salt = [0u8; 16];

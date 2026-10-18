@@ -206,6 +206,22 @@ impl Profile {
         }
     }
 
+    /// Registered entries for the page a browser is on. A subdomain matches its
+    /// registered domain on a label boundary (`login.github.com` → `github.com`), never
+    /// a mere suffix (`evilgithub.com` does not).
+    pub fn entries_for_host(&self, host: &str) -> Vec<(usize, &Entry)> {
+        let host = crate::phishing::decode_host(host);
+        self.entries
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| {
+                let registered = e.settings.site_key();
+                let here = site_key(&host, e.settings.spec_version);
+                !registered.is_empty() && (here == registered || here.ends_with(&format!(".{registered}")))
+            })
+            .collect()
+    }
+
     pub fn validate(&self) -> Result<()> {
         if !(1..=3).contains(&self.format_version) || self.spec_version != 1 {
             return Err("未対応のプロファイルバージョンです。codepass を更新してください".into());
@@ -372,6 +388,23 @@ mod tests {
         let mut upper = e.clone();
         upper.source_sha256 = upper.source_sha256.to_uppercase();
         assert!(matches!(upper.verify(&key), MacStatus::Valid));
+    }
+
+    #[test]
+    fn entries_for_host_matches_subdomains_on_label_boundaries() {
+        let mut p = Profile::new().unwrap();
+        let mut gh = entry("github.com", 1, 1);
+        gh.settings.spec_version = 2;
+        p.entries = vec![gh, entry("example.com", 1, 2)];
+        let hits = |host: &str| p.entries_for_host(host).iter().map(|(i, _)| *i).collect::<Vec<_>>();
+        assert_eq!(hits("github.com"), [0]);
+        assert_eq!(hits("www.github.com"), [0]);
+        assert_eq!(hits("login.GitHub.com"), [0]);
+        assert!(hits("evilgithub.com").is_empty());
+        assert!(hits("github.com.evil.example").is_empty());
+        assert!(hits("g\u{456}thub.com").is_empty());
+        assert_eq!(hits("example.com"), [1]);
+        assert!(hits("xn--gthub-n2e.com").is_empty(), "Punycode look-alike");
     }
 
     #[test]

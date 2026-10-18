@@ -46,8 +46,32 @@ jobs:
         with:
           name: ${{ matrix.target }}
           path: ${{ env.ASSET }}
+  extension:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          targets: wasm32-unknown-unknown
+      - name: Build the WebAssembly core into the extension
+        run: |
+          version=$(grep -A1 'name = "wasm-bindgen"$' Cargo.lock | sed -n 's/version = "\(.*\)"/\1/p' | head -1)
+          cargo install --locked wasm-bindgen-cli --version "$version"
+          ./scripts/build-web.sh
+      - name: Package
+        run: |
+          name=codepass-extension-${GITHUB_REF_NAME}
+          cp -R extension "$name"
+          zip -qr "$name.zip" "$name"
+          echo "ASSET=$name.zip" >> "$GITHUB_ENV"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: extension
+          path: ${{ env.ASSET }}
   publish:
-    needs: build
+    needs: [build, extension]
     runs-on: ubuntu-latest
     permissions:
       contents: write # create the release

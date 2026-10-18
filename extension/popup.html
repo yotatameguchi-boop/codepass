@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>CodePass</title>
+<link rel="stylesheet" href="ui.css">
+</head>
+<body class="popup">
+<header class="bar">
+  <strong class="logo">CodePass</strong>
+  <button type="button" id="options" class="link">設定</button>
+</header>
+
+<section class="page" aria-live="polite">
+  <p class="label">このページ</p>
+  <p class="host mono" id="host">…</p>
+  <p class="sub" id="looks" hidden></p>
+  <p class="sub" id="scheme"></p>
+</section>
+
+<section id="setup" hidden>
+  <p>まだ設定が読み込まれていません。CLI で書き出した設定ファイルと、材料のファイルを読み込んでください。</p>
+  <button type="button" id="open-options">設定を開く</button>
+</section>
+
+<section id="danger" class="danger" hidden>
+  <p class="danger-title">入力しないでください</p>
+  <p id="danger-text"></p>
+</section>
+
+<section id="unregistered" hidden>
+  <p>このサイトは登録されていません。</p>
+  <p class="sub">CLI で登録すると使えます:</p>
+  <p class="mono code" id="register-cmd"></p>
+</section>
+
+<form id="form" hidden>
+  <label for="entry">アカウント</label>
+  <select id="entry"></select>
+  <label for="secret">マスターシークレット</label>
+  <input type="password" id="secret" autocomplete="off" required>
+  <button type="submit" id="go">パスワードを作る</button>
+</form>
+
+<section id="result" hidden>
+  <p class="label">確認コード（いつもと違えば打ち間違い）</p>
+  <p class="checkcode mono" id="check"></p>
+  <p class="sub" id="note"></p>
+  <div class="row">
+    <button type="button" id="fill">ページに入力</button>
+    <button type="button" id="copy" class="ghost">コピー</button>
+  </div>
+</section>
+
+<ul class="warnings" id="warnings"></ul>
+<p class="error" id="error" role="alert"></p>
+<script type="module" src="popup.js"></script>
+</body>
+</html>

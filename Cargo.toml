@@ -1,6 +1,6 @@
 [package]
 name = "codepass"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 license = "MIT"
 description = "Offline, deterministic passwords from source code and a master secret"
@@ -21,6 +21,7 @@ getrandom = "0.2"
 hex = "0.4"
 hkdf = "0.12"
 hmac = "0.12"
+idna = "1.1.0"
 rpassword = { version = "7", optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

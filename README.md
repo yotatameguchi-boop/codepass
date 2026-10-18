@@ -1,10 +1,32 @@
 # CodePass
 
-ソースコードのファイルとマスターシークレットから、サービスごとに異なるパスワードを**毎回同じように**作り直すオフラインCLI。パスワードはどこにも保存しない。
+[English](README.en.md)
+
+ソースコードのファイルとマスターシークレットから、サービスごとに異なるパスワードを**毎回同じように**作り直すツール。
+パスワードはどこにも保存しない。CLI・ブラウザ拡張・Web デモが、同じ Rust のコードで動きます。
 
 ```
 ソースコード + マスターシークレット + サービス情報 → パスワード
 ```
+
+| | |
+|---|---|
+| **CLI** | `codepass get github.com --copy` |
+| **ブラウザ拡張** | ログイン画面でアイコンを押し、シークレットを入れるだけ。開いているページの本当のドメインで判定し、そっくりな偽サイトには入力しない |
+| **Web デモ** | https://yotatameguchi-boop.github.io/codepass/ （インストール不要・通信なし） |
+
+## なぜソースコードなのか
+
+開発者にとってソースコードは、毎日さわっていて、Git で履歴ごと持ち歩けて、思い入れのあるものです
+（はじめて書いたプログラム、大事なプロジェクトの1ファイル）。CodePass はそれを「自分だけの材料」として使います。
+
+- **覚えるのはシークレット1つだけ。** サービスごとのパスワードは毎回計算で作り直すので、保存先（パスワードの金庫）が漏れる心配がない。
+- **材料は Git で守れる。** コミットに固定すれば、ファイルを編集しても、改行コードが変わっても、PC を替えても同じパスワードが出る。
+- **ソースコードは秘密として扱わない。** 公開されていても安全なように、強さはシークレット（と任意のセキュリティキー）だけで決まる設計にしています。
+
+「決まった入力から決まったパスワードを作る」こと自体は昔からある考え方です。CodePass が力を入れているのは、
+**それを本当に何年後でも・どの環境でも再現できること**と、**それを証拠で示すこと**です（仕様書・別言語の参照実装・
+形式検証・ファジング・署名付きの配布物）。
 
 > **実験的なOSSです。** 暗号設計の第三者レビューが終わるまで、重要なアカウントには使わないでください。
 > ソースコードは公開されている可能性があるため、秘密としては扱いません。安全性はマスターシークレットの強さに依存します。
@@ -27,8 +49,22 @@ Releases のファイルには、GitHub Actions がこのリポジトリのソ�
 SLSA build provenance）と、部品表（SBOM）が付いています。GitHub CLI で誰でも確認できます。
 
 ```sh
-gh attestation verify codepass-v0.3.0-aarch64-apple-darwin.tar.gz -R yotatameguchi-boop/codepass
+gh attestation verify codepass-v0.4.0-aarch64-apple-darwin.tar.gz -R yotatameguchi-boop/codepass
 ```
+
+### ブラウザ拡張（Chrome / Edge）
+
+1. [Releases](https://github.com/yotatameguchi-boop/codepass/releases) から `codepass-extension-*.zip` をダウンロードして展開する
+2. `chrome://extensions` を開き、「デベロッパー モード」をオンにして「パッケージ化されていない拡張機能を読み込む」で展開したフォルダを選ぶ
+3. 拡張の「設定」で、CLI で書き出した設定ファイル（`codepass profile export`）と材料のファイルを読み込む
+4. ログイン画面でアイコンを押し、マスターシークレットを入れて「ページに入力」
+
+- 判定には**ブラウザが実際に開いているドメイン**を使います。手で入力したURLではないので、Punycode（`xn--…`）で表示される
+  そっくりな偽ドメインも見抜いて、パスワードを作りません。`login.github.com` のようなサブドメインは `github.com` の登録で使えます。
+- 保存するのは秘密でない情報（salt・登録内容・材料のファイル）だけ。マスターシークレットは保存しません。
+- 入力するのは、開いているページの最上位フレームのパスワード欄だけです。ページが途中で変わったら入力しません。
+- 権限は `activeTab`・`scripting`・`storage` だけで、どのサイトのデータも常時読む権限は持ちません。
+- セキュリティキーを使う設定は CLI で使ってください。
 
 ### ブラウザで試す
 
@@ -123,9 +159,17 @@ codepass --config codepass-backup.json regenerate main.py --entry 1   # ファ�
 
 ```sh
 codepass bench     # このマシンでの鍵導出時間と、攻撃にかかる時間の目安
+codepass doctor    # 設定の点検（材料のファイルが変わっていないか、署名・そっくりな登録の有無など）
 ```
 
 セキュリティキーは実機での動作確認がまだです（FIDO2 の hmac-secret に対応したキーが必要）。
+
+## これから
+
+- 第三者による暗号設計のレビュー（それまでは実験段階）
+- ブラウザ拡張のストア公開と Firefox 対応、セキュリティキーの拡張からの利用
+- サービスごとの文字ルール（最大文字数・使える記号）のプリセット
+- 実機のセキュリティキーでの検証
 
 ## 気をつけること
 
@@ -177,7 +221,8 @@ SHA-256（コード）→ Argon2id（マスターシークレット, 64MiB / 3�
 | そっくりなドメインの検出（Unicode TR39） | [`unicode-security`](https://crates.io/crates/unicode-security) |
 | セキュリティキー（FIDO2 hmac-secret） | [`ctap-hid-fido2`](https://crates.io/crates/ctap-hid-fido2)（`fido2` 機能） |
 | コアダンプ無効化・メモリ固定 | [`libc`](https://crates.io/crates/libc)（setrlimit / mlock / prctl） |
-| ブラウザ版デモ | WebAssembly ＋ [`wasm-bindgen`](https://crates.io/crates/wasm-bindgen)（[web/](web/)） |
+| ブラウザ版デモ・ブラウザ拡張 | WebAssembly ＋ [`wasm-bindgen`](https://crates.io/crates/wasm-bindgen)（[web/](web/)・[extension/](extension/)、Chrome Manifest V3） |
+| Punycode のドメインを元の文字に戻す（照合だけ） | [`idna`](https://crates.io/crates/idna) |
 | 設定ファイル（JSON）の読み書き | [`serde`](https://crates.io/crates/serde) / [`serde_json`](https://crates.io/crates/serde_json) / [`hex`](https://crates.io/crates/hex) |
 | OS ごとの設定ファイルの置き場所 | [`directories`](https://crates.io/crates/directories) |
 | コミットからのファイル読み込み | `git` コマンド（`rev-parse` / `cat-file` のみ） |

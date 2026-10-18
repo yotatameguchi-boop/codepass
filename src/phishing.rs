@@ -7,6 +7,22 @@
 
 use unicode_security::{confusable_detection::skeleton, MixedScript};
 
+/// Browsers report internationalized hosts in Punycode (`xn--gthub-n2e.com`), which
+/// hides what the reader sees. Decodes each `xn--` label back to Unicode (`gіthub.com`)
+/// and leaves every other label untouched. Used for matching and look-alike checks
+/// only, never for deriving a password.
+pub fn decode_host(host: &str) -> String {
+    host.split('.')
+        .map(|label| match label.get(..4) {
+            Some(prefix) if prefix.eq_ignore_ascii_case("xn--") => {
+                idna::punycode::decode_to_string(&label[4..]).unwrap_or_else(|| label.to_string())
+            }
+            _ => label.to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join(".")
+}
+
 /// The TR39 skeleton: two strings that render alike share it.
 pub fn skeleton_of(site: &str) -> String {
     skeleton(site).collect()
@@ -58,6 +74,20 @@ mod tests {
         assert_eq!(lookalikes("rnicrosoft.com", ["microsoft.com"]), ["microsoft.com"]);
         assert!(lookalikes("github.com", registered).is_empty(), "the same name is not a look-alike");
         assert!(lookalikes("gitlab.com", registered).is_empty());
+    }
+
+    #[test]
+    fn punycode_hosts_are_checked_as_they_look() {
+        assert_eq!(decode_host("xn--gthub-n2e.com"), "g\u{456}thub.com");
+        assert_eq!(decode_host("login.XN--gthub-n2e.com"), "login.g\u{456}thub.com");
+        assert_eq!(decode_host("github.com"), "github.com");
+        assert_eq!(decode_host("xn--bcher-kva.example"), "bücher.example");
+        assert_eq!(
+            decode_host("xn--!!invalid.com"),
+            "xn--!!invalid.com",
+            "undecodable labels stay as they are"
+        );
+        assert_eq!(lookalikes(&decode_host("xn--gthub-n2e.com"), ["github.com"]), ["github.com"]);
     }
 
     #[test]

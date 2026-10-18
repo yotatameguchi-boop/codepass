@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>CodePass の設定</title>
+<link rel="stylesheet" href="ui.css">
+</head>
+<body class="options">
+<header class="bar">
+  <strong class="logo">CodePass の設定</strong>
+</header>
+
+<p class="notice">ここに保存するのは<strong>秘密でない情報だけ</strong>です（salt・登録内容・材料のファイル）。
+マスターシークレットは保存せず、ポップアップで毎回入力します。計算はすべてこのブラウザの中で行い、外部には通信しません。</p>
+
+<section class="card">
+  <h2>1. 設定ファイルを読み込む</h2>
+  <p class="sub">CLI で書き出したファイルを選んでください。</p>
+  <p class="mono code">codepass profile export --output codepass-profile.json</p>
+  <input type="file" id="profile" accept=".json,application/json">
+  <p class="sub" id="profile-status"></p>
+</section>
+
+<section class="card">
+  <h2>2. 材料のファイルを読み込む</h2>
+  <p class="sub">登録に使ったソースコードを選んでください（複数選べます）。中身が登録時と同じものだけ保存します。
+  <code>--git</code> で登録したものは、そのコミットの中身を書き出して選んでください。</p>
+  <input type="file" id="sources" multiple>
+  <p class="sub" id="sources-status"></p>
+</section>
+
+<section class="card">
+  <h2>登録の一覧</h2>
+  <table id="entries">
+    <thead><tr><th>サービス</th><th>アカウント</th><th>更新</th><th>材料</th></tr></thead>
+    <tbody></tbody>
+  </table>
+  <p class="sub" id="empty">まだありません。</p>
+</section>
+
+<section class="card">
+  <h2>消去</h2>
+  <p class="sub">この拡張に保存した設定と材料のファイルをすべて消します。</p>
+  <button type="button" id="clear" class="ghost">すべて消去</button>
+</section>
+
+<p class="error" id="error" role="alert"></p>
+<script type="module" src="options.js"></script>
+</body>
+</html>

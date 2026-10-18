@@ -4,6 +4,7 @@
 use codepass::{
     crypto::{self, Charset, Settings},
     phishing,
+    profile::{MacStatus, Profile},
 };
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -87,6 +88,148 @@ pub fn generate(
         lookalikes,
     };
     serde_json::to_string(&out).map_err(|e| err(e.to_string()))
+}
+
+fn parse_profile(json: &str) -> Result<Profile, String> {
+    let p: Profile =
+        serde_json::from_str(json).map_err(|_| "設定ファイル（JSON）の形式が不正です".to_string())?;
+    p.validate()?;
+    Ok(p)
+}
+
+fn js<T>(r: Result<T, String>) -> Result<T, JsError> {
+    r.map_err(|m| JsError::new(&m))
+}
+
+#[derive(Serialize)]
+struct EntrySummary {
+    index: usize,
+    site: String,
+    account: String,
+    revision: u32,
+    length: usize,
+    spec_version: u32,
+    source_sha256: String,
+    source_path: Option<String>,
+    git_commit: Option<String>,
+    signed: bool,
+}
+
+fn summarize(index: usize, e: &codepass::profile::Entry) -> EntrySummary {
+    EntrySummary {
+        index,
+        site: e.settings.site_key(),
+        account: e.settings.account.clone(),
+        revision: e.settings.revision,
+        length: e.settings.length,
+        spec_version: e.settings.spec_version,
+        source_sha256: e.source_sha256.to_ascii_lowercase(),
+        source_path: e.source_path.clone(),
+        git_commit: e.git_commit.clone(),
+        signed: e.mac.is_some(),
+    }
+}
+
+/// Checks a profile exported by the CLI and lists its entries (no secrets involved).
+#[wasm_bindgen]
+pub fn inspect_profile(profile_json: &str) -> Result<String, JsError> {
+    js(inspect_profile_impl(profile_json))
+}
+
+fn inspect_profile_impl(profile_json: &str) -> Result<String, String> {
+    let p = parse_profile(profile_json)?;
+    #[derive(Serialize)]
+    struct Inspected {
+        entries: Vec<EntrySummary>,
+        hardware_key: bool,
+    }
+    let out = Inspected {
+        entries: p.entries.iter().enumerate().map(|(i, e)| summarize(i, e)).collect(),
+        hardware_key: p.hardware_key.is_some(),
+    };
+    serde_json::to_string(&out).map_err(|e| e.to_string())
+}
+
+/// What the extension shows for the page it is on: the registered entries for this
+/// host, or the registered names this host imitates (phishing), plus warnings.
+#[wasm_bindgen]
+pub fn match_site(profile_json: &str, host: &str) -> Result<String, JsError> {
+    js(match_site_impl(profile_json, host))
+}
+
+fn match_site_impl(profile_json: &str, host: &str) -> Result<String, String> {
+    let p = parse_profile(profile_json)?;
+    let shown = phishing::decode_host(host);
+    let key = crypto::site_key(&shown, crypto::LATEST_SPEC);
+    let matches: Vec<EntrySummary> =
+        p.entries_for_host(host).into_iter().map(|(i, e)| summarize(i, e)).collect();
+    let registered: Vec<String> = p.entries.iter().map(|e| e.settings.site_key()).collect();
+    let lookalikes = if matches.is_empty() {
+        phishing::lookalikes(&key, registered.iter().map(String::as_str))
+    } else {
+        Vec::new()
+    };
+    #[derive(Serialize)]
+    struct Matched {
+        site_key: String,
+        matches: Vec<EntrySummary>,
+        lookalikes: Vec<String>,
+        warnings: Vec<String>,
+    }
+    let out = Matched { warnings: phishing::suspicious_parts(&key), site_key: key, matches, lookalikes };
+    serde_json::to_string(&out).map_err(|e| e.to_string())
+}
+
+/// Regenerates the password of one registered entry, exactly as `codepass get` does:
+/// the code must hash to the registered value and the entry's signature must verify.
+#[wasm_bindgen]
+pub fn derive_entry(
+    profile_json: &str,
+    index: usize,
+    source: &[u8],
+    secret: &str,
+) -> Result<String, JsError> {
+    js(derive_entry_impl(profile_json, index, source, secret))
+}
+
+fn derive_entry_impl(
+    profile_json: &str,
+    index: usize,
+    source: &[u8],
+    secret: &str,
+) -> Result<String, String> {
+    let err = |m: &str| m.to_string();
+    let p = parse_profile(profile_json)?;
+    if p.hardware_key.is_some() {
+        return Err(err("セキュリティキーを使う設定は、CLI（codepass get）で使ってください"));
+    }
+    let e = p.entries.get(index).ok_or_else(|| err("指定された登録がありません"))?;
+    let hash: [u8; 32] = Sha256::digest(source).into();
+    if !hex::encode(hash).eq_ignore_ascii_case(&e.source_sha256) {
+        return Err(err("材料のファイルが登録時と違います。設定画面で正しいファイルを読み込んでください"));
+    }
+    let salt = p.salt_bytes()?;
+    let master = crypto::master_key(secret, &salt)?;
+    let check_code = crypto::check_code(&master)?;
+    let mac_key = crypto::entry_mac_key(&master)?;
+    let note = match e.verify(&mac_key) {
+        MacStatus::Valid => None,
+        MacStatus::Missing => Some("この登録には改ざん検知の署名がありません（v0.2以前の登録）".to_string()),
+        MacStatus::Invalid => {
+            return Err(format!(
+                "登録内容の署名が合いません。マスターシークレットの打ち間違いか、設定が書き換えられた可能性があります（確認コード: {check_code}）"
+            ))
+        }
+    };
+    let password = crypto::derive_with_master(&master, &hash, &e.settings)?;
+    #[derive(Serialize)]
+    struct Derived {
+        password: String,
+        check_code: String,
+        note: Option<String>,
+    }
+    serde_json::to_string(&Derived { password: password.to_string(), check_code, note })
+        .map_err(|e| e.to_string())
 }
 
 /// How the CLI would name this service (spec v2 normalization).
@@ -226,6 +369,67 @@ pub fn run_vectors() -> Vec<VectorResult> {
 
 #[cfg(test)]
 mod tests {
+    use codepass::{
+        crypto::{self, Charset, Settings},
+        profile::{Entry, Profile},
+    };
+    use sha2::{Digest, Sha256};
+
+    /// Builds a profile the way the CLI would after `generate`, then checks that the
+    /// extension's path gives the same password and refuses tampering.
+    #[test]
+    fn extension_path_matches_the_cli() {
+        let secret = "orbit velvet quartz lagoon pickle saddle";
+        let source = b"print('seed')\n";
+        let hash: [u8; 32] = Sha256::digest(source).into();
+        let mut p = Profile::new().unwrap();
+        let settings = Settings {
+            site: "github.com".into(),
+            account: String::new(),
+            length: 24,
+            charset: Charset::Strong,
+            revision: 1,
+            require_classes: true,
+            spec_version: 2,
+            symbols: None,
+        };
+        let master = crypto::master_key(secret, &p.salt_bytes().unwrap()).unwrap();
+        let mut e = Entry {
+            source_sha256: hex::encode(hash),
+            settings: settings.clone(),
+            source_path: None,
+            git_commit: None,
+            mac: None,
+        };
+        e.sign(&crypto::entry_mac_key(&master).unwrap());
+        p.entries.push(e);
+        let json = serde_json::to_string(&p).unwrap();
+        let expected = crypto::derive_with_master(&master, &hash, &settings).unwrap();
+
+        let out: serde_json::Value =
+            serde_json::from_str(&super::derive_entry_impl(&json, 0, source, secret).unwrap()).unwrap();
+        assert_eq!(out["password"], expected.as_str());
+        assert!(super::derive_entry_impl(&json, 0, b"other code", secret).is_err(), "wrong material");
+        assert!(
+            super::derive_entry_impl(&json, 0, source, "orbit velvet quartz lagoon pickle saddlf").is_err(),
+            "typo"
+        );
+        let tampered = json.replace("\"length\":24", "\"length\":8");
+        assert!(super::derive_entry_impl(&tampered, 0, source, secret).is_err(), "tampered length");
+
+        let m: serde_json::Value =
+            serde_json::from_str(&super::match_site_impl(&json, "login.github.com").unwrap()).unwrap();
+        assert_eq!(m["matches"][0]["index"], 0);
+        // Browsers hand over the Punycode form; it must still be caught.
+        for host in ["g\u{456}thub.com", "xn--gthub-n2e.com"] {
+            let phish: serde_json::Value =
+                serde_json::from_str(&super::match_site_impl(&json, host).unwrap()).unwrap();
+            assert_eq!(phish["lookalikes"][0], "github.com", "{host}");
+            assert!(phish["matches"].as_array().unwrap().is_empty());
+            assert_eq!(phish["site_key"], "g\u{456}thub.com");
+        }
+    }
+
     #[test]
     fn vectors_match_natively() {
         for v in super::run_vectors() {
