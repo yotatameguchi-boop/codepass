@@ -6,3 +6,7 @@ VECTOR2 github.com {V%6C]_6?3LL{7WjgmK*w3d5
 VECTOR2 example.com C4NjZMNsIEn1zgt!
 VECTOR2 bücher.example SQu45BiZtd3p
 CHECK fountain-basil-oyster
+HW_CHALLENGE 741dd79e70a63cb84658f0459c4e87e06bb21a2f6b0e8a48f081a5aa32f7d228
+HW_CHECK tundra-arrow-koala
+HW_PASSWORD ;yhTNd&we>>dG7OSo3sC4|Or
+ENTRY_MAC 533acb4ee90fc06be3404a35ada8f7bf5e088816e3cf2946a7a31cfdecfd7764

@@ -1,6 +1,10 @@
 # コントリビューション
 
-- 変更は Pull Request でお願いします。CI（Linux / macOS / Windows のテスト、clippy、依存ライブラリの監査）が通ることが条件です。
+- 変更は Pull Request でお願いします。CI が通ることが条件です（Linux / macOS / Windows のテスト、clippy、
+  Python 参照実装との突き合わせ、ファジング、Kani による形式検証、cargo-deny と RustSec による依存の検査）。
+- GitHub Actions は必ずコミットIDで固定してください（タグは書き換えられるため）。
 - **生成結果が変わる変更は、既存ユーザーのパスワードを作り直せなくします。** その場合は `spec_version` を上げて新しい仕様として追加し、v1 の処理とテストベクター（`tests/vectors.rs`）は消さないでください。[docs/SPEC.md](docs/SPEC.md) も合わせて更新してください。
 - 暗号処理は広く使われているライブラリ（RustCrypto）を使い、独自の暗号方式は作りません。
 - 秘密情報（マスターシークレット・生成結果）をログ、エラーメッセージ、ファイルに出さないでください。
+- 生成や正規化、設定ファイルの読み込みを変えたときは、ファジング（`cargo +nightly fuzz run <対象>`）と
+  `cargo kani --lib` も手元で回してください。新しい不変条件はファジングの対象か Kani の証明として足してください。

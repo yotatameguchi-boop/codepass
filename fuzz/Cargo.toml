@@ -1,0 +1,49 @@
+[package]
+name = "codepass-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+serde_json = "1"
+hex = "0.4"
+
+[dependencies.codepass]
+path = ".."
+
+# Each target states an invariant that must hold for every input.
+
+[[bin]]
+name = "profile_json"
+path = "fuzz_targets/profile_json.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "site_normalize"
+path = "fuzz_targets/site_normalize.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "derive_rules"
+path = "fuzz_targets/derive_rules.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "entry_mac"
+path = "fuzz_targets/entry_mac.rs"
+test = false
+doc = false
+bench = false
+
+# Built separately with cargo-fuzz (nightly), outside the main workspace.
+[workspace]

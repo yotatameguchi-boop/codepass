@@ -18,7 +18,22 @@ Rust がある場合は [crates.io](https://crates.io/crates/codepass) から入
 
 ```sh
 cargo install --locked codepass
+cargo install --locked codepass --features fido2   # セキュリティキー（YubiKey など）を使う場合
 ```
+
+### ダウンロードしたファイルが本物か確かめる
+
+Releases のファイルには、GitHub Actions がこのリポジトリのソースから作ったことを示す署名付きの証明（Sigstore による
+SLSA build provenance）と、部品表（SBOM）が付いています。GitHub CLI で誰でも確認できます。
+
+```sh
+gh attestation verify codepass-v0.3.0-aarch64-apple-darwin.tar.gz -R yotatameguchi-boop/codepass
+```
+
+### ブラウザで試す
+
+**https://yotatameguchi-boop.github.io/codepass/** で、CLI と同じ Rust のコードを WebAssembly にしたデモを動かせます。
+計算はすべてブラウザの中で行い、外部には通信しません。仕様のテストベクターをそのブラウザで検証するボタンもあります。
 
 ## 使い方
 
@@ -36,7 +51,7 @@ codepass get github.com --copy        # クリップボードへ。20秒後（�
 ```
 
 マスターシークレットは画面に出ない形で聞かれます。入力後に出る**確認コード**（例: `koala-torch-coconut`）を覚えておいてください。
-いつもと違う単語が出たら打ち間違いです。
+いつもと違う単語が出たら打ち間違いです。登録済みのサービスなら、打ち間違いは署名の照合で確実に検出され、パスワードは出ません。
 
 結果は最初 `****` で隠れていて、`reveal` で表示、`copy` でコピーできます。
 `--reveal` を付けると確認なしで標準出力に出します。
@@ -93,15 +108,35 @@ codepass --config codepass-backup.json regenerate main.py --entry 1   # ファ�
 
 既存の設定ファイルは決して丸ごと上書きしません。登録の追加・削除でも salt は変わらないことを確かめてから書き換えます。
 
+## セキュリティの仕組み
+
+詳しくは [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md)（何をどこまで守るか、総当たりにかかる時間の試算）にまとめています。
+
+| 守りたいこと | 仕組み |
+|---|---|
+| 漏れたパスワードから他を割り出されない | Argon2id で1回の試行を重くする。`codepass bench` で、総当たりにかかる時間の目安をその場で表示できる |
+| フィッシングサイトにパスワードを出さない | 登録済みサービスと見た目がそっくりな別ドメイン（キリル文字の `і` を使った `gіthub.com`、`paypa1.com` など）を Unicode TR39 で検出し、`get` はパスワードを出さない |
+| 設定ファイルを書き換えられても気づく | 各登録にマスター鍵から作った HMAC 署名を付け、合わなければパスワードを出さない |
+| シークレットを盗まれても再現されない（任意） | `init --hardware-key` で FIDO2 セキュリティキーを登録すると、キーの中の秘密（取り出せない）が鍵に混ざる |
+| メモリから鍵を読まれない | コアダンプを無効化し、鍵を置くメモリをスワップさせない（mlock）。使い終わったらゼロで消す。Linux では他のプロセスからの読み取り（ptrace）も拒否 |
+| 配布物を改ざんされない | 署名付きのビルド証明と SBOM。Actions はコミットIDで固定。cargo-deny と RustSec で依存を検査 |
+
+```sh
+codepass bench     # このマシンでの鍵導出時間と、攻撃にかかる時間の目安
+```
+
+セキュリティキーは実機での動作確認がまだです（FIDO2 の hmac-secret に対応したキーが必要）。
+
 ## 気をつけること
 
 - **ソースコードは1バイトでも変わると別のパスワードになります。** `--git` で固定するのがおすすめです。
 - `xn--` で始まる表記（Punycode）と、それを日本語などで書いた表記は別のサービスとして扱います。普段見ている表記で統一してください。
 - マスターシークレットが推測されやすそうな場合は警告を出します（パスワードは作ります）。無関係な単語を5つ以上つなげたものなどがおすすめです。
-- マスターシークレットを打ち間違えてもエラーにはならず、別のパスワードが出ます。確認コードで気づけます。
+- 未登録のまま `generate` するときは、打ち間違えてもエラーにはならず別のパスワードが出ます。確認コードで気づけます。
+- セキュリティキーを登録した設定では、**キーをなくすとパスワードを作り直せません**。予備のキーで同じ設定を作ることはできない（キーごとに秘密が違う）ので、大事なアカウントには使わないでください。
 - クリップボードはコピー履歴に残さないよう指定していますが、対応していないクリップボード管理ツールでは残る場合があります。
 - マスターシークレットはコマンド引数・環境変数・パイプからは受け取りません（履歴に残さないため）。
-- 端末のマルウェア、フィッシング、画面やクリップボードの盗み見は防げません。パスキーや多要素認証の代わりにはなりません。
+- 端末のマルウェアや、画面・クリップボードの盗み見は防げません。フィッシングは登録済みサービスのそっくりさんに限って止められます。パスキーや多要素認証の代わりにはなりません。
 
 ## 仕組み
 
@@ -109,7 +144,8 @@ SHA-256（コード）→ Argon2id（マスターシークレット, 64MiB / 3�
 
 詳細は [docs/SPEC.md](docs/SPEC.md)。仕様だけから書いた別実装 [docs/reference.py](docs/reference.py) が
 [tests/vectors.rs](tests/vectors.rs) のテストベクターと一致することを、CIで毎回確かめています。
-文字の偏りがないことの統計的な検定や、ランダムな入力に対する性質テスト（proptest）も入っています。
+文字の偏りがないことは、**Kani によるモデル検査で証明**しています（アルファベットが62〜94文字のどの大きさでも、各文字にちょうど同じ数のバイト値が対応する）。
+ほかに、統計的な検定、ランダムな入力での性質テスト（proptest）、4種類のファジング（cargo-fuzz）を CI で回しています。
 
 ## 使用技術
 
@@ -138,6 +174,10 @@ SHA-256（コード）→ Argon2id（マスターシークレット, 64MiB / 3�
 | Ctrl+C でもクリップボードを消す | [`ctrlc`](https://crates.io/crates/ctrlc) |
 | シークレットの推測されやすさの判定 | [`zxcvbn`](https://crates.io/crates/zxcvbn) |
 | サービス名・アカウント名の Unicode 正規化（NFC / NFKC） | [`unicode-normalization`](https://crates.io/crates/unicode-normalization) |
+| そっくりなドメインの検出（Unicode TR39） | [`unicode-security`](https://crates.io/crates/unicode-security) |
+| セキュリティキー（FIDO2 hmac-secret） | [`ctap-hid-fido2`](https://crates.io/crates/ctap-hid-fido2)（`fido2` 機能） |
+| コアダンプ無効化・メモリ固定 | [`libc`](https://crates.io/crates/libc)（setrlimit / mlock / prctl） |
+| ブラウザ版デモ | WebAssembly ＋ [`wasm-bindgen`](https://crates.io/crates/wasm-bindgen)（[web/](web/)） |
 | 設定ファイル（JSON）の読み書き | [`serde`](https://crates.io/crates/serde) / [`serde_json`](https://crates.io/crates/serde_json) / [`hex`](https://crates.io/crates/hex) |
 | OS ごとの設定ファイルの置き場所 | [`directories`](https://crates.io/crates/directories) |
 | コミットからのファイル読み込み | `git` コマンド（`rev-parse` / `cat-file` のみ） |
@@ -148,19 +188,32 @@ SHA-256（コード）→ Argon2id（マスターシークレット, 64MiB / 3�
 |---|---|
 | 単体・結合テスト、テストベクター | Rust 標準のテスト、[`tempfile`](https://crates.io/crates/tempfile) |
 | ランダムな入力での性質テスト | [`proptest`](https://crates.io/crates/proptest) |
+| ファジング（4種類。毎回45秒、毎週10分ずつ） | [cargo-fuzz](https://github.com/rust-fuzz/cargo-fuzz)（libFuzzer）（[fuzz/](fuzz/)） |
+| 形式検証（モデル検査） | [Kani](https://github.com/model-checking/kani) |
+| 依存のライセンス・脆弱性・取得元の検査 | [cargo-deny](https://github.com/EmbarkStudios/cargo-deny) |
+| リポジトリのセキュリティ評価 | [OpenSSF Scorecard](https://securityscorecards.dev/) |
 | 仕様だけから書いた別実装との突き合わせ | Python 3 ＋ [`argon2-cffi`](https://pypi.org/project/argon2-cffi/)（[docs/reference.py](docs/reference.py)） |
 | 整形・静的解析 | rustfmt / Clippy |
 | 依存ライブラリの脆弱性検査 | [RustSec](https://rustsec.org/)（`rustsec/audit-check`） |
 | CI（Linux / macOS / Windows） | GitHub Actions |
 | 配布（5種類の実行ファイルと `SHA256SUMS`） | GitHub Actions ＋ GitHub Releases |
+| 配布物の証明 | Sigstore 署名の SLSA build provenance と SPDX の SBOM（GitHub Artifact Attestations） |
 
 ## 開発
 
 ```sh
-cargo fmt --check
-cargo test
-cargo clippy --all-targets -- -D warnings
+cargo fmt --all --check
+cargo test --workspace
+cargo clippy --workspace --all-targets -- -D warnings
 python docs/reference.py | diff - docs/reference-expected.txt   # pip install argon2-cffi
+
+cargo +nightly fuzz run derive_rules -- -max_total_time=60      # ファジング（cargo install cargo-fuzz）
+cargo kani --lib                                                 # 形式検証（cargo install kani-verifier）
+
+# ブラウザ版デモ（rustup target add wasm32-unknown-unknown / cargo install wasm-bindgen-cli）
+cargo build --release -p codepass-web --target wasm32-unknown-unknown
+wasm-bindgen --target web --no-typescript --out-dir web/www/pkg target/wasm32-unknown-unknown/release/codepass_web.wasm
+python3 -m http.server --directory web/www
 ```
 
 [CONTRIBUTING.md](CONTRIBUTING.md) と [SECURITY.md](SECURITY.md) も見てください。ライセンスは [MIT](LICENSE)。

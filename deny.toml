@@ -1,0 +1,34 @@
+# cargo-deny: checked in CI on every push (licenses, advisories, bans, sources).
+
+[graph]
+all-features = true
+
+[advisories]
+# RustSec advisories: any known vulnerability or unmaintained crate fails the build.
+yanked = "deny"
+
+[licenses]
+# Permissive licenses only. MPL-2.0 is file-level copyleft and used unmodified
+# (option-ext, via directories), which keeps CodePass itself MIT.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-3-Clause",
+    "ISC",
+    "BSL-1.0",
+    "Zlib",
+    "Unlicense",
+    "Unicode-3.0",
+    "MPL-2.0",
+]
+confidence-threshold = 0.9
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+
+[sources]
+# Only crates.io; no git dependencies that could change under us.
+unknown-registry = "deny"
+unknown-git = "deny"

@@ -243,6 +243,7 @@ impl Profile {
     }
 }
 
+#[cfg(feature = "cli")]
 pub fn default_path() -> Result<PathBuf> {
     directories::ProjectDirs::from("", "", "codepass")
         .map(|dirs| dirs.config_dir().join("profile.json"))

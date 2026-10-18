@@ -79,6 +79,24 @@ def gen(master, code_hash, site, acct, length, cs, rev, req, ver=1, symbols=None
         if not req or all(any(x in cl for x in c) for cl in classes): return c.decode()
 
 
+def hardware_challenge(salt):
+    return hashlib.sha256(b"CodePass/hw-challenge/v1\0" + salt).digest()
+
+
+def with_hardware(master, hw_output):
+    return hkdf(b"CodePass/hw-factor/v1", master + hw_output, b"CodePass/master/v1")
+
+
+def entry_mac(master, source_sha256_hex, site, account, length, cs, rev, req, spec, symbols, path, commit):
+    def lp(b): return struct.pack(">I", len(b)) + b
+    def opt(v): return b"\0" if v is None else b"\1" + lp(v.encode())
+    data = (b"CodePass/entry/v1\0" + lp(source_sha256_hex.lower().encode()) + lp(site.encode()) + lp(account.encode())
+            + struct.pack(">I", length) + bytes([1 if cs == "strong" else 2]) + struct.pack(">I", rev)
+            + bytes([int(req)]) + struct.pack(">I", spec) + opt(symbols) + opt(path) + opt(commit))
+    key = hkdf(b"CodePass/HKDF/v1", master, b"CodePass/entry-mac/v1")
+    return hmac.new(key, data, hashlib.sha256).hexdigest()
+
+
 src = b'fn main() {\n    println!("hello");\n}\n'
 m = master_key("correct horse battery staple 2026", b"CodePassTestSalt")
 h = hashlib.sha256(src).digest()
@@ -89,3 +107,10 @@ for args, sym in [(("https://www.GitHub.com/login", " personal ", 24, "strong"),
                   (("example.com", "", 16, "strong"), "!#$%@"), (("Bücher.example", "", 12, "alnum"), None)]:
     print("VECTOR2", site_v2(args[0]), gen(m, h, *args, 1, True, ver=2, symbols=sym))
 print("CHECK", check_code(m))
+salt = b"CodePassTestSalt"
+print("HW_CHALLENGE", hardware_challenge(salt).hex())
+mh = with_hardware(m, bytes([0x11]) * 32)
+print("HW_CHECK", check_code(mh))
+print("HW_PASSWORD", gen(mh, h, "github.com", "", 24, "strong", 1, True, ver=2))
+print("ENTRY_MAC", entry_mac(m, h.hex(), "github.com", "", 24, "strong", 1, True, 2, None,
+                             "/home/me/keys/main.rs", "0123456789abcdef0123456789abcdef01234567"))

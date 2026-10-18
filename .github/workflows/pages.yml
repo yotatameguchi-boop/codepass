@@ -1,0 +1,44 @@
+name: Web demo
+on:
+  push:
+    branches: [main]
+    paths: ["src/**", "web/**", "Cargo.toml", "Cargo.lock", ".github/workflows/pages.yml"]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: pages
+  cancel-in-progress: true
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          targets: wasm32-unknown-unknown
+      - name: Build WebAssembly
+        run: |
+          version=$(grep -A1 'name = "wasm-bindgen"$' Cargo.lock | sed -n 's/version = "\(.*\)"/\1/p' | head -1)
+          cargo install --locked wasm-bindgen-cli --version "$version"
+          cargo build --locked --release -p codepass-web --target wasm32-unknown-unknown
+          wasm-bindgen --target web --no-typescript --out-dir web/www/pkg \
+            target/wasm32-unknown-unknown/release/codepass_web.wasm
+      - uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
+      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: web/www
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1

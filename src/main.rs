@@ -100,6 +100,8 @@ enum Command {
         #[command(subcommand)]
         command: ProfileCommand,
     },
+    #[command(about = "このマシンで鍵導出の時間を測り、総当たり攻撃にかかる時間の目安を表示する")]
+    Bench,
 }
 
 #[derive(Subcommand)]
@@ -126,6 +128,7 @@ fn run() -> Result<()> {
         None => profile::default_path()?,
     };
     match cli.command {
+        Command::Bench => bench()?,
         Command::Init { hardware_key } => {
             let mut p = profile::Profile::new()?;
             if hardware_key {
@@ -361,6 +364,87 @@ fn run() -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Attacker model for the cost table (docs/THREAT_MODEL.md explains each number).
+/// Argon2id with 64 MiB and 3 passes moves roughly 3 × 3 × 64 MiB ≈ 0.6 GB of memory
+/// per guess, so a GPU is bounded by its memory bandwidth, not its compute.
+const GPU_BANDWIDTH_BYTES: f64 = 1.0e12; // a high-end GPU, about 1 TB/s
+const BYTES_PER_GUESS: f64 = 9.0 * 64.0 * 1024.0 * 1024.0;
+const GPUS: f64 = 1000.0;
+const SHA256_PER_GPU: f64 = 1.0e10; // unsalted fast hash, for comparison
+
+fn bench() -> Result<()> {
+    let salt = [0u8; 16];
+    let runs = 3;
+    let start = std::time::Instant::now();
+    for i in 0..runs {
+        let _ = crypto::master_key(&format!("benchmark secret number {i}"), &salt)?;
+    }
+    let local = start.elapsed().as_secs_f64() / runs as f64;
+    let per_gpu = GPU_BANDWIDTH_BYTES / BYTES_PER_GUESS;
+    let argon_rate = per_gpu * GPUS;
+    let sha_rate = SHA256_PER_GPU * GPUS;
+    println!("このマシンでの鍵導出（Argon2id 64MiB・3回）: {:.2} 秒/回", local);
+    println!();
+    println!("攻撃者の想定: GPU {GPUS:.0} 台（1台あたり帯域 約1TB/s → 約{per_gpu:.0} 回/秒）");
+    println!("平均でかかる時間（探す範囲の半分を試したところで当たるとして）:");
+    println!();
+    let rows: [(&str, f64); 5] = [
+        ("推測しやすい（zxcvbnで弱い判定）", 1e8),
+        ("警告の境目（約10^10通り）", 1e10),
+        ("無関係な英単語4つ（7776^4）", 7776f64.powi(4)),
+        ("無関係な英単語5つ（7776^5）", 7776f64.powi(5)),
+        ("ランダムな英数字16文字（62^16）", 62f64.powi(16)),
+    ];
+    println!(
+        "  {}{}{}",
+        pad_end("シークレット", 36),
+        pad_start("CodePass", 14),
+        pad_start("ただのSHA-256なら", 20)
+    );
+    for (label, space) in rows {
+        println!(
+            "  {}{}{}",
+            pad_end(label, 36),
+            pad_start(&human_time(space / 2.0 / argon_rate), 14),
+            pad_start(&human_time(space / 2.0 / sha_rate), 20)
+        );
+    }
+    println!();
+    println!("セキュリティキーを登録した設定では、キーが手元にない限り試すこと自体ができません。");
+    println!("数値は桁の目安です。前提と計算は docs/THREAT_MODEL.md にあります。");
+    Ok(())
+}
+
+fn human_time(seconds: f64) -> String {
+    const MIN: f64 = 60.0;
+    const HOUR: f64 = 3600.0;
+    const DAY: f64 = 86400.0;
+    const YEAR: f64 = 365.25 * DAY;
+    match seconds {
+        s if s < 1.0 => "1秒未満".into(),
+        s if s < MIN => format!("{s:.0}秒"),
+        s if s < HOUR => format!("{:.0}分", s / MIN),
+        s if s < DAY => format!("{:.0}時間", s / HOUR),
+        s if s < YEAR => format!("{:.0}日", s / DAY),
+        s if s < 1e4 * YEAR => format!("{:.0}年", s / YEAR),
+        s if s < 1e8 * YEAR => format!("約{:.0}万年", s / YEAR / 1e4),
+        s if s < 1e12 * YEAR => format!("約{:.0}億年", s / YEAR / 1e8),
+        s if s < 1e16 * YEAR => format!("約{:.0}兆年", s / YEAR / 1e12),
+        s => format!("約10^{:.0}年", (s / YEAR).log10()),
+    }
+}
+
+// Terminal columns: CJK characters take two cells.
+fn pad_end(text: &str, cells: usize) -> String {
+    let w = unicode_width::UnicodeWidthStr::width(text);
+    format!("{text}{}", " ".repeat(cells.saturating_sub(w)))
+}
+
+fn pad_start(text: &str, cells: usize) -> String {
+    let w = unicode_width::UnicodeWidthStr::width(text);
+    format!("{}{text}", " ".repeat(cells.saturating_sub(w)))
 }
 
 fn registered_sites(p: &profile::Profile) -> Vec<String> {

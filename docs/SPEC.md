@@ -107,9 +107,25 @@ SYMBOLS = !#$%&()*+,-./:;<=>?@[]^_{|}~      (strong のみ。28文字。" ' ` \ 
 
 候補の試行は 1,000,000 回で打ち切ってエラーにする（実際には到達しない）。
 
+## セキュリティキー（任意の第2要素）
+
+プロファイルに `hardware_key` があるときは、上の `master` をそのまま使わず、FIDO2 セキュリティキーの
+hmac-secret 拡張の出力を混ぜたものを `master` とする。以降の処理（確認コード・context・署名）はすべてこの値を使う。
+
+```
+challenge = SHA-256("CodePass/hw-challenge/v1" || 0x00 || salt)          (32 bytes)
+hw_output = hmac-secret(credential_id, rp_id = "codepass", salt1 = challenge) (32 bytes)
+master'   = HKDF-SHA256(salt = "CodePass/hw-factor/v1", ikm = master || hw_output,
+                        info = "CodePass/master/v1", L = 32)
+```
+
+`hw_output` はキーの中にしかない秘密から作られ、キーの外に取り出せない。`credential_id` は秘密ではないが、
+同じキー・同じ資格情報でないと同じ値は返らない。
+
 ## 確認コード
 
-マスターシークレットの打ち間違いに気づくための3単語。`salt` と `secret` だけで決まり、どこにも保存しない。
+マスターシークレットの打ち間違いに気づくための3単語。`salt` と `secret`（セキュリティキーを使う設定ではキーの応答も）
+だけで決まり、どこにも保存しない。
 
 ```
 code = HKDF-SHA256(salt = "CodePass/HKDF/v1", ikm = master, info = "CodePass/check-code/v1", L = 3)
@@ -119,6 +135,28 @@ check_code = WORDS[code[0]] + "-" + WORDS[code[1]] + "-" + WORDS[code[2]]
 `WORDS` は `src/words.rs` の256語（並び順も仕様の一部）。24ビットしかないため、総当たりの手がかりとしては
 生成済みパスワード1つよりはるかに弱い。
 
+## 設定の改ざん検知（エントリの署名）
+
+プロファイルの各エントリに、`master` から導いた鍵で HMAC-SHA256 の署名（`mac`、64桁の16進）を付ける。
+`get` / `regenerate` は、パスワードを出す前にこれを確かめ、合わなければ出さない。
+シークレットを打ち間違えても鍵が変わるので、登録済みのサービスでは打ち間違いも確実に検出できる。
+
+```
+mac_key = HKDF-SHA256(salt = "CodePass/HKDF/v1", ikm = master, info = "CodePass/entry-mac/v1", L = 32)
+data    = "CodePass/entry/v1" || 0x00
+        || lp(lowercase(source_sha256))
+        || lp(site) || lp(account)                 -- 入力されたまま（正規化前）
+        || u32be(length) || u8(charset) || u32be(revision) || u8(require_classes)
+        || u32be(spec_version)
+        || opt(symbols) || opt(source_path) || opt(git_commit)
+mac     = HMAC-SHA256(mac_key, data)
+
+lp(x)  = u32be(len(x)) || x                        -- x は UTF-8 バイト列
+opt(x) = 0x00（なし） または 0x01 || lp(x)
+```
+
+比較は定数時間で行う。v0.2 以前に登録したエントリには署名がなく、その場合は注意を表示して続行する。
+
 ## Gitからの読み込み
 
 `--git REV` を付けると、作業中のファイルではなくコミットに入っている内容（`git cat-file blob <commit>:./<file>`
@@ -127,7 +165,8 @@ check_code = WORDS[code[0]] + "-" + WORDS[code[1]] + "-" + WORDS[code[2]]
 
 ## テストベクター
 
-`tests/vectors.rs` に固定入力と期待される出力（v1を4件・v2を3件と確認コード）を置いている。
+`tests/vectors.rs` に固定入力と期待される出力（v1を4件・v2を3件、確認コード、セキュリティキーの応答を混ぜた場合、
+エントリの署名）を置いている。
 別実装はこれと一致することを確認すること。仕様だけから書いた Python 版 `docs/reference.py` の出力は
 `docs/reference-expected.txt` と一致し、CIで毎回確かめている。
 
@@ -140,7 +179,7 @@ check_code = WORDS[code[0]] + "-" + WORDS[code[1]] + "-" + WORDS[code[2]]
 
 ```json
 {
-  "format_version": 2,
+  "format_version": 3,
   "spec_version": 1,
   "salt": "<16バイトの16進>",
   "entries": [
@@ -149,14 +188,17 @@ check_code = WORDS[code[0]] + "-" + WORDS[code[1]] + "-" + WORDS[code[2]]
       "settings": { "site": "github.com", "account": "", "length": 24, "charset": "strong",
                     "revision": 1, "require_classes": true, "spec_version": 2, "symbols": "!#@" },
       "source_path": "/Users/me/keys/main.py",
-      "git_commit": "<コミットID。Gitから読んだときだけ>"
+      "git_commit": "<コミットID。Gitから読んだときだけ>",
+      "mac": "<署名。64桁の16進>"
     }
-  ]
+  ],
+  "hardware_key": { "credential_id": "<16進>", "rp_id": "codepass" }
 }
 ```
 
-- `format_version` 1 は `source_path` / `git_commit` を持たない旧形式。どちらも読み込める。
+- `format_version` 1 は `source_path` / `git_commit` を、2 は `mac` / `hardware_key` を持たない旧形式。どれも読み込める。
+- `hardware_key` は `init --hardware-key` のときだけ設定でき、salt と同じく後から変更できない。
 - `site` は入力されたまま保存し、照合のたびにそのエントリの版の正規化をかける。
 - エントリは「サービス・アカウント・更新番号」で区別する。同じ組み合わせで内容が違う登録は、明示しない限り置き換えない。
 - `init` / `profile export` / `profile import` は既存ファイルを上書きしない。登録の追加・削除は一時ファイルに書いてから
-  置き換え、その前後で salt が変わっていないことを確かめる（salt が変わると全パスワードを再生成できなくなるため）。
+  置き換え、その前後で salt と `hardware_key` が変わっていないことを確かめる（変わると全パスワードを再生成できなくなるため）。

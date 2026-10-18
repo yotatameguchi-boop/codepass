@@ -1,6 +1,6 @@
 [package]
 name = "codepass"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 license = "MIT"
 description = "Offline, deterministic passwords from source code and a master secret"
@@ -8,25 +8,26 @@ repository = "https://github.com/yotatameguchi-boop/codepass"
 readme = "README.md"
 keywords = ["password", "argon2", "cli", "deterministic", "kdf"]
 categories = ["command-line-utilities", "cryptography"]
-exclude = [".github/", "tests/*.proptest-regressions"]
+exclude = [".github/", "tests/*.proptest-regressions", "fuzz/", "web/"]
 
 [dependencies]
-arboard = { version = "3.6", default-features = false }
+arboard = { version = "3.6", default-features = false, optional = true }
 argon2 = "0.5"
-clap = { version = "4.5", features = ["derive"] }
+clap = { version = "4.5", features = ["derive"], optional = true }
 ctap-hid-fido2 = { version = "3.6.0", optional = true }
-ctrlc = "3.5.2"
-directories = "6"
+ctrlc = { version = "3.5.2", optional = true }
+directories = { version = "6", optional = true }
 getrandom = "0.2"
 hex = "0.4"
 hkdf = "0.12"
 hmac = "0.12"
-rpassword = "7"
+rpassword = { version = "7", optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
 unicode-normalization = "0.1"
 unicode-security = "0.1.2"
+unicode-width = { version = "0.2.2", optional = true }
 zeroize = "1"
 zxcvbn = "3.1.1"
 
@@ -37,7 +38,23 @@ tempfile = "3"
 [target."cfg(unix)".dependencies]
 libc = "0.2.191"
 
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
+
 [features]
+default = ["cli"]
+# The command-line tool. The library alone (no terminal, clipboard or config
+# directory) builds for WebAssembly: see web/.
+cli = ["dep:clap", "dep:arboard", "dep:ctrlc", "dep:directories", "dep:rpassword", "dep:unicode-width"]
 # Real FIDO2 security keys (USB HID). Off by default: needs hidapi.
-fido2 = ["dep:ctap-hid-fido2"]
+fido2 = ["cli", "dep:ctap-hid-fido2"]
+
+[[bin]]
+name = "codepass"
+path = "src/main.rs"
+required-features = ["cli"]
+
+[workspace]
+members = [".", "web"]
+exclude = ["fuzz"]
 

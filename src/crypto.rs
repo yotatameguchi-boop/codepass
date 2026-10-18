@@ -15,7 +15,8 @@ const SYMBOLS: &[u8] = b"!#$%&()*+,-./:;<=>?@[]^_{|}~";
 /// Spec used for new passwords. Older versions stay supported for regeneration.
 pub const LATEST_SPEC: u32 = 2;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "cli", derive(clap::ValueEnum))]
 #[serde(rename_all = "lowercase")]
 pub enum Charset {
     Strong,
@@ -278,6 +279,29 @@ pub fn check_code(master: &[u8; 32]) -> Result<String> {
     Ok(out.iter().map(|&b| crate::words::WORDS[b as usize]).collect::<Vec<_>>().join("-"))
 }
 
+/// Rejection sampling: maps one random byte to a character, or rejects it.
+/// Bytes at or above the largest multiple of the alphabet size are rejected, so
+/// every character is hit by exactly the same number of byte values (proved by Kani).
+fn pick(byte: u8, alphabet: &[u8]) -> Option<u8> {
+    let n = alphabet.len();
+    if n == 0 || n > 256 {
+        return None;
+    }
+    let limit = 256 / n * n;
+    let b = byte as usize;
+    if b < limit {
+        Some(alphabet[b % n])
+    } else {
+        None
+    }
+}
+
+/// Lower, upper, digit, and (when symbols are in use) a symbol all present.
+fn meets_classes(candidate: &[u8], symbols: &[u8]) -> bool {
+    let contains = |class: &[u8]| candidate.iter().any(|b| class.contains(b));
+    contains(LOWER) && contains(UPPER) && contains(DIGITS) && (symbols.is_empty() || contains(symbols))
+}
+
 fn render(key: &[u8; 32], settings: &Settings) -> Result<Zeroizing<String>> {
     let symbols = settings.symbol_set();
     let mut alphabet = Vec::new();
@@ -285,7 +309,6 @@ fn render(key: &[u8; 32], settings: &Settings) -> Result<Zeroizing<String>> {
     alphabet.extend_from_slice(UPPER);
     alphabet.extend_from_slice(DIGITS);
     alphabet.extend_from_slice(symbols);
-    let limit = 256usize / alphabet.len() * alphabet.len();
     let label = format!("CodePass/stream/v{}\0", settings.spec_version);
     let mut counter = 0u64;
     let mut block = Zeroizing::new([0u8; 32]);
@@ -302,25 +325,93 @@ fn render(key: &[u8; 32], settings: &Settings) -> Result<Zeroizing<String>> {
                 counter = counter.checked_add(1).ok_or("生成カウンタが上限に達しました")?;
                 offset = 0;
             }
-            let b = block[offset] as usize;
+            let b = block[offset];
             offset += 1;
-            if b < limit {
-                candidate.push(alphabet[b % alphabet.len()]);
+            if let Some(c) = pick(b, &alphabet) {
+                candidate.push(c);
             }
         }
-        let contains = |class: &[u8]| candidate.iter().any(|b| class.contains(b));
-        if !settings.require_classes
-            || (contains(LOWER)
-                && contains(UPPER)
-                && contains(DIGITS)
-                && (symbols.is_empty() || contains(symbols)))
-        {
+        if !settings.require_classes || meets_classes(&candidate, symbols) {
             return String::from_utf8(candidate.to_vec())
                 .map(Zeroizing::new)
                 .map_err(|_| "文字列生成エラー".into());
         }
     }
     Err("条件を満たすパスワードを生成できませんでした".into())
+}
+
+/// Model-checked with Kani (`cargo kani`): these hold for *every* input in range,
+/// not just the ones a test happens to try.
+#[cfg(kani)]
+mod proofs {
+    use super::*;
+
+    /// Rejection sampling is exactly uniform: for every alphabet size CodePass can
+    /// use (62 to 94 characters) every position is hit by exactly 256 / n byte values.
+    #[kani::proof]
+    #[kani::unwind(258)]
+    fn pick_is_exactly_uniform() {
+        let n: usize = kani::any();
+        kani::assume((62..=94).contains(&n));
+        let idx: usize = kani::any();
+        kani::assume(idx < n);
+        let mut alphabet = [0u8; 94];
+        let mut i = 0;
+        while i < 94 {
+            alphabet[i] = i as u8;
+            i += 1;
+        }
+        let mut hits = 0usize;
+        let mut rejected = 0usize;
+        let mut b = 0usize;
+        while b < 256 {
+            match pick(b as u8, &alphabet[..n]) {
+                Some(c) if c as usize == idx => hits += 1,
+                Some(_) => {}
+                None => rejected += 1,
+            }
+            b += 1;
+        }
+        assert_eq!(hits, 256 / n);
+        // Fewer than n values are thrown away, so at most 31 of 256 (12%) at n = 94.
+        assert!(rejected < n);
+    }
+
+    /// Whatever the alphabet holds, a picked character is one of its members.
+    #[kani::proof]
+    #[kani::unwind(96)]
+    fn pick_stays_in_alphabet() {
+        let alphabet: [u8; 94] = kani::any();
+        let n: usize = kani::any();
+        kani::assume((1..=94).contains(&n));
+        let byte: u8 = kani::any();
+        if let Some(c) = pick(byte, &alphabet[..n]) {
+            assert!(alphabet[..n].contains(&c));
+        }
+    }
+
+    /// A symbol set is accepted only as non-empty ASCII punctuation, and comes back
+    /// strictly sorted (so equal sets always encode to the same bytes).
+    #[kani::proof]
+    #[kani::unwind(5)]
+    fn canonical_symbols_is_sorted_punctuation() {
+        let bytes: [u8; 3] = kani::any();
+        let len: usize = kani::any();
+        kani::assume(len <= 3);
+        let Ok(input) = std::str::from_utf8(&bytes[..len]) else { return };
+        if let Ok(out) = canonical_symbols(input) {
+            let out = out.as_bytes();
+            assert!(!out.is_empty());
+            let mut i = 0;
+            while i < out.len() {
+                assert!(out[i].is_ascii_punctuation());
+                if i > 0 {
+                    assert!(out[i - 1] < out[i]);
+                }
+                i += 1;
+            }
+        }
+    }
 }
 
 #[cfg(test)]

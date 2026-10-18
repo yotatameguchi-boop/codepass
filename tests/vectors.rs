@@ -99,3 +99,32 @@ fn spec_v2_vectors() {
         .unwrap()
     );
 }
+
+#[test]
+fn hardware_and_entry_mac_vectors() {
+    use codepass::{crypto, profile::Entry};
+    let hash: [u8; 32] = Sha256::digest(SOURCE).into();
+    let master = crypto::master_key(SECRET, &SALT).unwrap();
+    assert_eq!(
+        hex::encode(crypto::hardware_challenge(&SALT)),
+        "741dd79e70a63cb84658f0459c4e87e06bb21a2f6b0e8a48f081a5aa32f7d228"
+    );
+    // A security key answering 0x11 × 32 to that challenge.
+    let with_key = crypto::with_hardware(&master, &[0x11; 32]).unwrap();
+    assert_eq!(crypto::check_code(&with_key).unwrap(), "tundra-arrow-koala");
+    let s = Settings { spec_version: 2, ..settings("github.com", "", 24, Charset::Strong, 1, true) };
+    assert_eq!(&*crypto::derive_with_master(&with_key, &hash, &s).unwrap(), r#";yhTNd&we>>dG7OSo3sC4|Or"#);
+
+    let mut entry = Entry {
+        source_sha256: hex::encode(hash),
+        settings: s,
+        source_path: Some("/home/me/keys/main.rs".into()),
+        git_commit: Some("0123456789abcdef0123456789abcdef01234567".into()),
+        mac: None,
+    };
+    entry.sign(&crypto::entry_mac_key(&master).unwrap());
+    assert_eq!(
+        entry.mac.as_deref(),
+        Some("533acb4ee90fc06be3404a35ada8f7bf5e088816e3cf2946a7a31cfdecfd7764")
+    );
+}

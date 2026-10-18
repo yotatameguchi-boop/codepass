@@ -1,5 +1,11 @@
 name: CI
-on: [push, pull_request]
+on:
+  push:
+  pull_request:
+  schedule:
+    - cron: "17 3 * * 1" # weekly: longer fuzzing and fresh advisories
+permissions:
+  contents: read
 jobs:
   test:
     strategy:
@@ -7,28 +13,102 @@ jobs:
         os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           components: rustfmt, clippy
-      - run: cargo fmt --check
-      - run: cargo test --all-targets --locked
-      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo fmt --all --check
+      - run: cargo test --workspace --all-targets --locked
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Library builds without the CLI (as used by the web demo)
+        run: cargo clippy -p codepass --lib --no-default-features -- -D warnings
+  fido2:
+    # The security-key build needs hidapi; check it compiles and lints everywhere.
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          components: clippy
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libudev-dev
+      - run: cargo clippy --all-targets --features fido2 --locked -- -D warnings
+      - run: cargo test --features fido2 --locked --lib hardware
+  wasm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          targets: wasm32-unknown-unknown
+          components: clippy
+      - run: cargo clippy --locked -p codepass-web --target wasm32-unknown-unknown -- -D warnings
   reference:
     # The Python implementation is written from docs/SPEC.md alone; it must keep matching.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
-      - run: pip install argon2-cffi
+      - run: pip install argon2-cffi==23.1.0
       - run: python docs/reference.py | diff - docs/reference-expected.txt
-  audit:
+  fuzz:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: rustsec/audit-check@v2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: nightly
+      - run: cargo install --locked cargo-fuzz
+      - name: Fuzz each target
+        env:
+          SECONDS_EACH: ${{ github.event_name == 'schedule' && '600' || '45' }}
+        run: |
+          for t in profile_json site_normalize derive_rules entry_mac; do
+            cargo +nightly fuzz run "$t" -- -max_total_time="$SECONDS_EACH"
+          done
+  kani:
+    # Model checking: proves the rejection sampler is exactly uniform for every alphabet size.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: model-checking/kani-github-action@f838096619a707b0f6b2118cf435eaccfa33e51f # v1.1
+        with:
+          args: --lib
+  deny:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+  audit:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+      checks: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+      - uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998 # v2.0.0
         with:
           token: ${{ secrets.GITHUB_TOKEN }}

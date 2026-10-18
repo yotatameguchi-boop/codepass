@@ -9,6 +9,7 @@
 use zeroize::Zeroize;
 
 /// Call once at startup, before any secret is read.
+#[cfg_attr(not(unix), allow(unused_mut))]
 pub fn harden_process() -> Vec<&'static str> {
     let mut failed = Vec::new();
     #[cfg(unix)]
