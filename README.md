@@ -15,13 +15,31 @@
 | **ブラウザ拡張** | ログイン画面でアイコンを押し、シークレットを入れるだけ。開いているページの本当のドメインで判定し、そっくりな偽サイトには入力しない |
 | **Web デモ** | https://yotatameguchi-boop.github.io/codepass/ （インストール不要・通信なし） |
 
+## コードの「意味」が鍵になる
+
+`--material syntax` で登録すると、パスワードはコードの**意味（構文）**から作られます。
+
+```sh
+codepass generate main.rs --site github.com --material syntax
+codepass inspect main.rs     # 材料として使われる部分を表示
+```
+
+- コメントを足す、インデントや改行を直す、フォーマッタをかける、末尾にカンマを足す → **同じパスワード**
+- 変数名・処理・文字列を変える → **別のパスワード**
+
+ソースコードを材料にするツールでしかできない性質です。Rust・Python・JavaScript/TypeScript・Go・C/C++/C#/Java・
+Kotlin/Scala/Swift/Dart に対応しています。構文解析器ではなく、仕様書に全規則を書いた小さな字句解析器で実装しているので、
+解析器の更新でパスワードが変わることはなく、別の言語でも同じ結果を再現できます（Python の参照実装と3万件のランダム入力で
+完全一致することを CI で確認）。[ブラウザ版デモ](https://yotatameguchi-boop.github.io/codepass/)では、入力に合わせて
+材料になる部分がその場で表示されます。
+
 ## なぜソースコードなのか
 
 開発者にとってソースコードは、毎日さわっていて、Git で履歴ごと持ち歩けて、思い入れのあるものです
 （はじめて書いたプログラム、大事なプロジェクトの1ファイル）。CodePass はそれを「自分だけの材料」として使います。
 
 - **覚えるのはシークレット1つだけ。** サービスごとのパスワードは毎回計算で作り直すので、保存先（パスワードの金庫）が漏れる心配がない。
-- **材料は Git で守れる。** コミットに固定すれば、ファイルを編集しても、改行コードが変わっても、PC を替えても同じパスワードが出る。
+- **材料は Git と構文で守れる。** 構文の材料なら整形やコメントを変えても、コミットに固定すればファイルを編集しても、同じパスワードが出る。
 - **ソースコードは秘密として扱わない。** 公開されていても安全なように、強さはシークレット（と任意のセキュリティキー）だけで決まる設計にしています。
 
 「決まった入力から決まったパスワードを作る」こと自体は昔からある考え方です。CodePass が力を入れているのは、
@@ -49,7 +67,7 @@ Releases のファイルには、GitHub Actions がこのリポジトリのソ�
 SLSA build provenance）と、部品表（SBOM）が付いています。GitHub CLI で誰でも確認できます。
 
 ```sh
-gh attestation verify codepass-v0.4.0-aarch64-apple-darwin.tar.gz -R yotatameguchi-boop/codepass
+gh attestation verify codepass-v0.5.0-aarch64-apple-darwin.tar.gz -R yotatameguchi-boop/codepass
 ```
 
 ### ブラウザ拡張（Chrome / Edge）
@@ -160,6 +178,7 @@ codepass --config codepass-backup.json regenerate main.py --entry 1   # ファ�
 ```sh
 codepass bench     # このマシンでの鍵導出時間と、攻撃にかかる時間の目安
 codepass doctor    # 設定の点検（材料のファイルが変わっていないか、署名・そっくりな登録の有無など）
+codepass inspect main.rs   # 構文の材料として使われる部分を表示
 ```
 
 セキュリティキーは実機での動作確認がまだです（FIDO2 の hmac-secret に対応したキーが必要）。
@@ -233,11 +252,11 @@ SHA-256（コード）→ Argon2id（マスターシークレット, 64MiB / 3�
 |---|---|
 | 単体・結合テスト、テストベクター | Rust 標準のテスト、[`tempfile`](https://crates.io/crates/tempfile) |
 | ランダムな入力での性質テスト | [`proptest`](https://crates.io/crates/proptest) |
-| ファジング（4種類。毎回45秒、毎週10分ずつ） | [cargo-fuzz](https://github.com/rust-fuzz/cargo-fuzz)（libFuzzer）（[fuzz/](fuzz/)） |
+| ファジング（5種類。毎回45秒、毎週10分ずつ） | [cargo-fuzz](https://github.com/rust-fuzz/cargo-fuzz)（libFuzzer）（[fuzz/](fuzz/)） |
 | 形式検証（モデル検査） | [Kani](https://github.com/model-checking/kani) |
 | 依存のライセンス・脆弱性・取得元の検査 | [cargo-deny](https://github.com/EmbarkStudios/cargo-deny) |
 | リポジトリのセキュリティ評価 | [OpenSSF Scorecard](https://securityscorecards.dev/) |
-| 仕様だけから書いた別実装との突き合わせ | Python 3 ＋ [`argon2-cffi`](https://pypi.org/project/argon2-cffi/)（[docs/reference.py](docs/reference.py)） |
+| 仕様だけから書いた別実装との突き合わせ | Python 3 ＋ [`argon2-cffi`](https://pypi.org/project/argon2-cffi/)（[docs/reference.py](docs/reference.py)・[docs/reference_syntax.py](docs/reference_syntax.py)）。構文の材料は3万件のランダム入力で差分検査 |
 | 整形・静的解析 | rustfmt / Clippy |
 | 依存ライブラリの脆弱性検査 | [RustSec](https://rustsec.org/)（`rustsec/audit-check`） |
 | CI（Linux / macOS / Windows） | GitHub Actions |

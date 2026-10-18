@@ -34,6 +34,8 @@ pub fn generate(
     symbols: &str,
     revision: u32,
     registered: &str,
+    syntax_material: bool,
+    file_name: &str,
 ) -> Result<String, JsError> {
     let err = |m: String| JsError::new(&m);
     let salt: [u8; 16] = hex::decode(salt_hex.trim())
@@ -76,7 +78,11 @@ pub fn generate(
     if let Some(w) = crypto::secret_warning(secret, &["codepass", site, account]) {
         warnings.push(w);
     }
-    let hash: [u8; 32] = Sha256::digest(source).into();
+    let hash: [u8; 32] = if syntax_material {
+        codepass::syntax::hash(source, file_name).map_err(err)?
+    } else {
+        Sha256::digest(source).into()
+    };
     let master = crypto::master_key(secret, &salt).map_err(err)?;
     let password = crypto::derive_with_master(&master, &hash, &settings).map_err(err)?;
     let out = Generated {
@@ -113,6 +119,7 @@ struct EntrySummary {
     source_path: Option<String>,
     git_commit: Option<String>,
     signed: bool,
+    material: Option<String>,
 }
 
 fn summarize(index: usize, e: &codepass::profile::Entry) -> EntrySummary {
@@ -127,7 +134,49 @@ fn summarize(index: usize, e: &codepass::profile::Entry) -> EntrySummary {
         source_path: e.source_path.clone(),
         git_commit: e.git_commit.clone(),
         signed: e.mac.is_some(),
+        material: e.material.clone(),
     }
+}
+
+/// The hash an entry expects from `source`: the bytes, or (syntax material) the token
+/// stream, with the language taken from the file name the entry was registered with.
+fn entry_material_hash(e: &codepass::profile::Entry, source: &[u8]) -> Result<[u8; 32], String> {
+    match e.material.as_deref() {
+        None => Ok(Sha256::digest(source).into()),
+        Some(_) => {
+            let path = e.source_path.as_deref().ok_or("構文の材料の登録にはファイル名が必要です")?;
+            let name = path.rsplit(['/', '\\']).next().unwrap_or(path);
+            codepass::syntax::hash(source, name)
+        }
+    }
+}
+
+/// For the extension's settings page: the hash entry `index` would see from these
+/// bytes (so a file can be matched to syntax-material entries too).
+#[wasm_bindgen]
+pub fn entry_hash_for(profile_json: &str, index: usize, source: &[u8]) -> Result<String, JsError> {
+    js((|| {
+        let p = parse_profile(profile_json)?;
+        let e = p.entries.get(index).ok_or("指定された登録がありません")?;
+        entry_material_hash(e, source).map(hex::encode)
+    })())
+}
+
+/// The tokens syntax material keeps from `code` (for showing what counts).
+#[wasm_bindgen]
+pub fn syntax_preview(code: &str, file_name: &str) -> Result<String, JsError> {
+    js((|| {
+        let lang = codepass::syntax::lang_for(file_name)?;
+        let tokens = codepass::syntax::tokens(code, lang)?;
+        #[derive(Serialize)]
+        struct Preview {
+            lang: &'static str,
+            tokens: Vec<String>,
+            hash: String,
+        }
+        let hash = hex::encode(codepass::syntax::hash(code.as_bytes(), file_name)?);
+        serde_json::to_string(&Preview { lang: lang.id(), tokens, hash }).map_err(|e| e.to_string())
+    })())
 }
 
 /// Checks a profile exported by the CLI and lists its entries (no secrets involved).
@@ -204,7 +253,7 @@ fn derive_entry_impl(
         return Err(err("セキュリティキーを使う設定は、CLI（codepass get）で使ってください"));
     }
     let e = p.entries.get(index).ok_or_else(|| err("指定された登録がありません"))?;
-    let hash: [u8; 32] = Sha256::digest(source).into();
+    let hash = entry_material_hash(e, source)?;
     if !hex::encode(hash).eq_ignore_ascii_case(&e.source_sha256) {
         return Err(err("材料のファイルが登録時と違います。設定画面で正しいファイルを読み込んでください"));
     }
@@ -400,6 +449,7 @@ mod tests {
             source_path: None,
             git_commit: None,
             mac: None,
+            material: None,
         };
         e.sign(&crypto::entry_mac_key(&master).unwrap());
         p.entries.push(e);
@@ -420,6 +470,27 @@ mod tests {
         let m: serde_json::Value =
             serde_json::from_str(&super::match_site_impl(&json, "login.github.com").unwrap()).unwrap();
         assert_eq!(m["matches"][0]["index"], 0);
+        // A syntax-material entry accepts a reformatted, commented copy of its code.
+        let code = "fn main() { let x = 1; }\n";
+        let syntax_hash = codepass::syntax::hash(code.as_bytes(), "main.rs").unwrap();
+        let mut p2 = p.clone();
+        let mut se = p2.entries[0].clone();
+        se.source_sha256 = hex::encode(syntax_hash);
+        se.source_path = Some("/home/me/keys/main.rs".into());
+        se.material = Some(codepass::syntax::MATERIAL_ID.into());
+        se.sign(&crypto::entry_mac_key(&master).unwrap());
+        p2.entries = vec![se];
+        let json2 = serde_json::to_string(&p2).unwrap();
+        let a: serde_json::Value =
+            serde_json::from_str(&super::derive_entry_impl(&json2, 0, code.as_bytes(), secret).unwrap())
+                .unwrap();
+        let b: serde_json::Value = serde_json::from_str(
+            &super::derive_entry_impl(&json2, 0, b"// note\nfn main(){\n  let x=1;\n}", secret).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(a["password"], b["password"]);
+        assert!(super::derive_entry_impl(&json2, 0, b"fn main() { let x = 2; }", secret).is_err());
+
         // Browsers hand over the Punycode form; it must still be caught.
         for host in ["g\u{456}thub.com", "xn--gthub-n2e.com"] {
             let phish: serde_json::Value =

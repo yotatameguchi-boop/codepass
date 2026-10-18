@@ -121,10 +121,44 @@ fn hardware_and_entry_mac_vectors() {
         source_path: Some("/home/me/keys/main.rs".into()),
         git_commit: Some("0123456789abcdef0123456789abcdef01234567".into()),
         mac: None,
+        material: None,
     };
     entry.sign(&crypto::entry_mac_key(&master).unwrap());
     assert_eq!(
         entry.mac.as_deref(),
         Some("533acb4ee90fc06be3404a35ada8f7bf5e088816e3cf2946a7a31cfdecfd7764")
+    );
+}
+
+#[test]
+fn syntax_material_vectors() {
+    use codepass::{crypto, syntax};
+    let rust = "// comment\nfn main() {\n    let x = add(1, 2,); /* note */\n    println!(\"{x}\");\n}\n";
+    let python = "def f(x, y):\n    if x:\n        return (1,)\n    return y  # done\n";
+    let master = crypto::master_key(SECRET, &SALT).unwrap();
+    let s = Settings { spec_version: 2, ..settings("github.com", "", 24, Charset::Strong, 1, true) };
+    for (name, code, hash, password) in [
+        (
+            "main.rs",
+            rust,
+            "892edba33cdf17d1329dbfd7c07a0bba2dd219c9bd2ec6a1362c9b61bef260e4",
+            r#"T8?H>m-UaDi};Yc-k_2UQvcO"#,
+        ),
+        (
+            "app.py",
+            python,
+            "5c68c9909110262893530a05ec3e3801a4a0e98e0a2aeb70f817f0a6c669c400",
+            r#":U.@Q}N=vN.<TK!CPAfnL)4("#,
+        ),
+    ] {
+        let h = syntax::hash(code.as_bytes(), name).unwrap();
+        assert_eq!(hex::encode(h), hash, "{name}");
+        assert_eq!(&*crypto::derive_with_master(&master, &h, &s).unwrap(), password, "{name}");
+    }
+    // The same Rust program, reformatted by hand, gives the same hash.
+    let reformatted = "fn main(){let x=add(1,2);println!(\"{x}\");}";
+    assert_eq!(
+        hex::encode(syntax::hash(reformatted.as_bytes(), "main.rs").unwrap()),
+        "892edba33cdf17d1329dbfd7c07a0bba2dd219c9bd2ec6a1362c9b61bef260e4"
     );
 }

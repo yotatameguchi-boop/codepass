@@ -1,7 +1,7 @@
 # Independent reference implementation of docs/SPEC.md (v1 and v2).
 # Needs: pip install argon2-cffi
 # Run from the repository root. Prints the same values pinned in tests/vectors.rs.
-import hashlib, hmac, re, struct, unicodedata
+import hashlib, hmac, re, struct, sys, unicodedata
 from argon2.low_level import hash_secret_raw, Type
 
 L = b"abcdefghijklmnopqrstuvwxyz"; U = L.upper(); D = b"0123456789"
@@ -115,3 +115,12 @@ print("HW_CHECK", check_code(mh))
 print("HW_PASSWORD", gen(mh, h, "github.com", "", 24, "strong", 1, True, ver=2))
 print("ENTRY_MAC", entry_mac(m, h.hex(), "github.com", "", 24, "strong", 1, True, 2, None,
                              "/home/me/keys/main.rs", "0123456789abcdef0123456789abcdef01234567"))
+
+sys.path.insert(0, "docs")
+from reference_syntax import syntax_hash  # noqa: E402
+
+RUST_SRC = "// comment\nfn main() {\n    let x = add(1, 2,); /* note */\n    println!(\"{x}\");\n}\n"
+PY_SRC = "def f(x, y):\n    if x:\n        return (1,)\n    return y  # done\n"
+for name, code in [("main.rs", RUST_SRC), ("app.py", PY_SRC)]:
+    sh = syntax_hash(code.encode(), name)
+    print("SYNTAX", name, sh.hex(), gen(m, sh, "github.com", "", 24, "strong", 1, True, ver=2))

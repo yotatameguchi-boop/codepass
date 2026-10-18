@@ -24,6 +24,23 @@ struct Cli {
     command: Command,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum Material {
+    /// ファイルのバイト列そのもの（1バイト違えば別のパスワード）
+    Bytes,
+    /// コードの構文（整形・コメント・空白の違いでは変わらない）
+    Syntax,
+}
+
+impl Material {
+    fn id(self) -> Option<&'static str> {
+        match self {
+            Material::Bytes => None,
+            Material::Syntax => Some(codepass::syntax::MATERIAL_ID),
+        }
+    }
+}
+
 #[derive(Args)]
 struct Output {
     #[arg(long, help = "生成結果を確認なしで標準出力に出す（リダイレクト可）")]
@@ -67,6 +84,9 @@ enum Command {
             help = "作業中のファイルではなく、Gitのこのコミットに入っている内容を使う"
         )]
         git: Option<String>,
+        #[arg(long, value_enum, default_value_t = Material::Bytes,
+            help = "コードのどこを材料にするか。syntax なら整形やコメントを変えても同じパスワード")]
+        material: Material,
         #[arg(long, help = "設定を登録しない")]
         no_save: bool,
         #[arg(long, conflicts_with = "no_save", help = "同じサービス・更新番号の登録済み設定を置き換える")]
@@ -104,6 +124,14 @@ enum Command {
     Bench,
     #[command(about = "設定を点検し、パスワードを作り直せなくなる原因がないか調べる")]
     Doctor,
+    #[command(about = "構文の材料として、コードのどこが使われるかを表示する")]
+    Inspect {
+        source: PathBuf,
+        #[arg(long, value_name = "REV", help = "Gitのこのコミットに入っている内容を使う")]
+        git: Option<String>,
+        #[arg(long, help = "使われるトークンをすべて表示する")]
+        all: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -132,6 +160,7 @@ fn run() -> Result<()> {
     match cli.command {
         Command::Bench => bench()?,
         Command::Doctor => doctor(&path)?,
+        Command::Inspect { source, git, all } => inspect(&source, git.as_deref(), all)?,
         Command::Init { hardware_key } => {
             let mut p = profile::Profile::new()?;
             if hardware_key {
@@ -222,12 +251,20 @@ fn run() -> Result<()> {
                 .source_path
                 .as_ref()
                 .ok_or("この設定にはファイルの場所が記録されていません。regenerate を使ってください")?;
-            let loaded = source::load(file.as_ref(), e.git_commit.as_deref())?;
+            let loaded =
+                source::load_material(file.as_ref(), e.git_commit.as_deref(), e.material.as_deref())?;
             if !hex::encode(loaded.sha256).eq_ignore_ascii_case(&e.source_sha256) {
-                return Err(format!(
-                    "{file} の内容が登録時と変わっています（1バイトでも違うと別のパスワードになります）。\
-                    元の内容に戻すか、次からは --git でコミットを指定して登録してください"
-                ));
+                return Err(if e.material.is_some() {
+                    format!(
+                        "{file} のコードの中身（構文）が登録時と変わっています。整形やコメントの違いは関係ありませんが、\
+                        名前や処理・文字列が変わると別のパスワードになります。元に戻してください"
+                    )
+                } else {
+                    format!(
+                        "{file} の内容が登録時と変わっています（1バイトでも違うと別のパスワードになります）。\
+                        元の内容に戻すか、次からは --git でコミットを指定するか --material syntax で登録してください"
+                    )
+                });
             }
             let master = unlock(&p, &e.settings)?;
             check_entry(e, &master)?;
@@ -241,7 +278,7 @@ fn run() -> Result<()> {
                 .checked_sub(1)
                 .and_then(|i| p.entries.get(i))
                 .ok_or("指定された番号の設定エントリがありません")?;
-            let loaded = source::load(&source, e.git_commit.as_deref())?;
+            let loaded = source::load_material(&source, e.git_commit.as_deref(), e.material.as_deref())?;
             if !hex::encode(loaded.sha256).eq_ignore_ascii_case(&e.source_sha256) {
                 return Err(
                     "ソースコードの内容が保存時と一致しません（1バイトでも違うと別のパスワードになります）"
@@ -265,6 +302,7 @@ fn run() -> Result<()> {
             symbols,
             no_require_classes,
             git,
+            material,
             no_save,
             replace,
             export_settings,
@@ -305,7 +343,7 @@ fn run() -> Result<()> {
                     look.join("」「")
                 ));
             }
-            let loaded = source::load(&source, git.as_deref())?;
+            let loaded = source::load_material(&source, git.as_deref(), material.id())?;
             let source_path = loaded.path.to_str().map(str::to_string);
             if source_path.is_none() && !no_save {
                 eprintln!("警告: パスがUTF-8でないため、ファイルの場所は記録しません");
@@ -316,6 +354,7 @@ fn run() -> Result<()> {
                 source_path,
                 git_commit: loaded.git_commit.clone(),
                 mac: None,
+                material: material.id().map(str::to_string),
             };
             // Check before asking for the secret: a mismatch usually means the file changed.
             if !no_save && !replace {
@@ -385,6 +424,35 @@ const BYTES_PER_GUESS: f64 = 9.0 * 64.0 * 1024.0 * 1024.0;
 const GPUS: f64 = 1000.0;
 const SHA256_PER_GPU: f64 = 1.0e10; // unsalted fast hash, for comparison
 
+fn inspect(path: &std::path::Path, git: Option<&str>, all: bool) -> Result<()> {
+    use codepass::syntax;
+    let name = path.file_name().and_then(|n| n.to_str()).ok_or("ファイル名はUTF-8である必要があります")?;
+    let lang = syntax::lang_for(name)?;
+    let (bytes, _) = source::read_bytes(path, git)?;
+    let text = std::str::from_utf8(&bytes).map_err(|_| "UTF-8 のテキストファイルではありません")?;
+    let toks = syntax::tokens(text, lang)?;
+    let shown: Vec<&str> = toks
+        .iter()
+        .map(|t| match t.as_str() {
+            syntax::NEWLINE => "⏎",
+            syntax::INDENT => "⇥",
+            syntax::DEDENT => "⇤",
+            other => other,
+        })
+        .collect();
+    let limit = if all { shown.len() } else { shown.len().min(60) };
+    println!("言語: {}（{name}）", lang.id());
+    println!("材料に使うトークン: {} 個（元のファイル {} バイト）", toks.len(), bytes.len());
+    println!();
+    println!("{}{}", shown[..limit].join(" "), if limit < shown.len() { " …" } else { "" });
+    println!();
+    println!("構文のハッシュ    : {}", hex::encode(syntax::hash(&bytes, name)?));
+    println!("バイト列のハッシュ: {}", hex::encode(<sha2::Sha256 as sha2::Digest>::digest(&bytes)));
+    println!();
+    println!("コメント・空白・改行・インデント幅・末尾のカンマを変えても、構文のハッシュ（= パスワード）は変わりません。");
+    Ok(())
+}
+
 /// One line of the doctor's report.
 enum Check {
     Ok(String),
@@ -438,20 +506,29 @@ fn doctor(path: &std::path::Path) -> Result<()> {
         let source = match &e.source_path {
             None => Err("ファイルの場所が記録されていません（regenerate でのみ使えます）".to_string()),
             Some(file) => {
-                source::load(file.as_ref(), e.git_commit.as_deref()).map_err(|err| format!("{file}: {err}"))
+                source::load_material(file.as_ref(), e.git_commit.as_deref(), e.material.as_deref())
+                    .map_err(|err| format!("{file}: {err}"))
             }
         };
         match source {
             Ok(loaded) if hex::encode(loaded.sha256).eq_ignore_ascii_case(&e.source_sha256) => {
                 if e.git_commit.is_some() {
                     checks.push(Check::Ok(format!("{name}: 材料はコミットで固定されています")));
+                } else if e.material.is_some() {
+                    checks.push(Check::Ok(format!(
+                        "{name}: 材料は構文で比べます（整形やコメントの変更では変わりません）"
+                    )));
                 } else {
                     checks.push(Check::Warn(
                         format!("{name}: 材料が作業中のファイルです"),
-                        "編集すると作り直せなくなります。--git で登録し直すと安全です".into(),
+                        "1バイトの編集でも作り直せなくなります。--git か --material syntax で登録し直すと安全です".into(),
                     ));
                 }
             }
+            Ok(_) if e.material.is_some() => checks.push(Check::Bad(
+                format!("{name}: コードの中身（構文）が登録時と変わっています"),
+                "整形やコメントは関係ありません。名前・処理・文字列の変更を元に戻してください".into(),
+            )),
             Ok(_) => checks.push(Check::Bad(
                 format!("{name}: 材料のファイルが登録時と変わっています"),
                 "元に戻すか、--git で固定したコミットを使ってください".into(),

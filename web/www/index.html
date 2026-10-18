@@ -24,15 +24,38 @@
 <main class="grid">
   <section class="card">
     <h2>入力</h2>
+    <div class="cols">
+      <div>
+        <label for="material">材料の使い方</label>
+        <select id="material">
+          <option value="syntax">構文（整形・コメントは無視）</option>
+          <option value="bytes">バイト列そのもの</option>
+        </select>
+      </div>
+      <div>
+        <label for="filename">ファイル名（言語の判定に使う）</label>
+        <input type="text" id="filename" value="main.rs" class="mono" autocomplete="off" spellcheck="false">
+      </div>
+    </div>
     <label for="source">材料のソースコード</label>
-    <textarea id="source" rows="5" spellcheck="false">fn main() {
-    println!("hello");
+    <textarea id="source" rows="8" spellcheck="false">fn main() {
+    let total = add(2, 3);
+    println!("{total}");
+}
+
+fn add(a: i32, b: i32) -> i32 {
+    a + b
 }
 </textarea>
     <div class="row">
       <input type="file" id="file" aria-label="ファイルから読み込む">
       <p class="hint mono" id="hash"></p>
     </div>
+    <details class="tokens" id="tokens-box" open>
+      <summary>パスワードの材料になる部分 <span class="hint" id="token-count"></span></summary>
+      <p class="hint">コメントを足したり、インデントや改行を変えたりしても、ここ（とパスワード）は変わりません。</p>
+      <div class="chips mono" id="tokens"></div>
+    </details>
 
     <label for="secret">マスターシークレット（デモ用）</label>
     <input type="password" id="secret" autocomplete="off" value="orbit velvet quartz lagoon pickle saddle">

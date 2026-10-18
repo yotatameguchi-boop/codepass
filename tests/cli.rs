@@ -55,3 +55,27 @@ fn init_export_import_and_safe_errors() {
     assert!(!codepass(&corrupt, &["profile", "list"]).status.success());
     assert_eq!(fs::read(&source).unwrap(), b"print('hello')\n");
 }
+
+#[test]
+fn inspect_shows_the_syntax_material() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("profile.json");
+    let a = dir.path().join("main.rs");
+    let b = dir.path().join("formatted.rs");
+    fs::write(&a, "fn main() { let x = 1; }\n").unwrap();
+    fs::write(&b, "// note\nfn main(){\n    let x=1;\n}\n").unwrap();
+    let hash_line = |path: &std::path::Path| {
+        let out = codepass(&config, &["inspect", path.to_str().unwrap()]);
+        assert!(out.status.success());
+        String::from_utf8(out.stdout)
+            .unwrap()
+            .lines()
+            .find(|l| l.starts_with("構文のハッシュ"))
+            .unwrap()
+            .to_string()
+    };
+    assert_eq!(hash_line(&a), hash_line(&b), "comments and layout do not count");
+    let txt = dir.path().join("notes.txt");
+    fs::write(&txt, "x").unwrap();
+    assert!(!codepass(&config, &["inspect", txt.to_str().unwrap()]).status.success());
+}

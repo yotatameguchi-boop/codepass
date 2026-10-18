@@ -47,6 +47,10 @@ pub struct Entry {
     /// Detects edits to the file, and proves the secret was typed correctly.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mac: Option<String>,
+    /// How the code becomes the hash: absent = the raw bytes, "syntax-v1" = the
+    /// token stream (crate::syntax). `source_sha256` holds whichever hash it is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub material: Option<String>,
 }
 
 pub enum MacStatus {
@@ -89,6 +93,10 @@ impl Entry {
         put_opt(&mut out, &s.symbols);
         put_opt(&mut out, &self.source_path);
         put_opt(&mut out, &self.git_commit);
+        // Appended only when set, so entries signed before it existed still verify.
+        if self.material.is_some() {
+            put_opt(&mut out, &self.material);
+        }
         out
     }
     pub fn sign(&mut self, key: &[u8; 32]) {
@@ -244,6 +252,9 @@ impl Profile {
             }) {
                 return Err("GitのコミットIDが不正です".into());
             }
+            if entry.material.as_deref().is_some_and(|m| m != crate::syntax::MATERIAL_ID) {
+                return Err("未対応の材料の種類です。codepass を更新してください".into());
+            }
             if entry.mac.as_ref().is_some_and(|m| m.len() != 64 || !m.bytes().all(|b| b.is_ascii_hexdigit()))
             {
                 return Err("設定の署名の形式が不正です".into());
@@ -350,6 +361,7 @@ mod tests {
             source_path: Some("/x/main.rs".into()),
             git_commit: None,
             mac: None,
+            material: None,
             settings: Settings {
                 site: site.into(),
                 account: "".into(),
@@ -371,7 +383,8 @@ mod tests {
         e.sign(&key);
         assert!(matches!(e.verify(&key), MacStatus::Valid));
         assert!(matches!(e.verify(&[4u8; 32]), MacStatus::Invalid), "another master key (typo) fails");
-        let edits: [fn(&mut Entry); 6] = [
+        let edits: [fn(&mut Entry); 7] = [
+            |e| e.material = Some("syntax-v1".into()),
             |e| e.settings.site = "evil.example".into(),
             |e| e.settings.length = 8,
             |e| e.settings.revision = 2,

@@ -1,4 +1,4 @@
-import init, { inspect_profile } from "./pkg/codepass_web.js";
+import init, { inspect_profile, entry_hash_for } from "./pkg/codepass_web.js";
 
 const $ = (id) => document.getElementById(id);
 const MAX_SOURCE_BYTES = 1024 * 1024;
@@ -39,7 +39,8 @@ async function render() {
   for (const e of info.entries) {
     const tr = document.createElement("tr");
     const ok = Boolean(sources[e.source_sha256]);
-    const cells = [e.site, e.account || "—", String(e.revision), ok ? "✓ 読み込み済み" : "未読み込み"];
+    const kind = e.material ? "（構文）" : "";
+    const cells = [e.site, e.account || "—", String(e.revision), (ok ? "✓ 読み込み済み" : "未読み込み") + kind];
     for (const text of cells) {
       const td = document.createElement("td");
       td.textContent = text;
@@ -81,7 +82,7 @@ async function main() {
       $("error").textContent = "先に設定ファイルを読み込んでください";
       return;
     }
-    const wanted = new Set(JSON.parse(inspect_profile(profile)).entries.map((e) => e.source_sha256));
+    const entries = JSON.parse(inspect_profile(profile)).entries;
     let added = 0;
     let skipped = 0;
     for (const file of $("sources").files) {
@@ -90,13 +91,26 @@ async function main() {
         continue;
       }
       const bytes = new Uint8Array(await file.arrayBuffer());
-      const hash = await sha256Hex(bytes);
-      if (wanted.has(hash)) {
-        sources[hash] = toBase64(bytes);
-        added++;
-      } else {
-        skipped++;
+      const byteHash = await sha256Hex(bytes);
+      let matched = false;
+      for (const e of entries) {
+        // Syntax-material entries compare the token stream, so a reformatted or
+        // commented copy of the registered code still matches.
+        let h = byteHash;
+        if (e.material) {
+          try {
+            h = entry_hash_for(profile, e.index, bytes);
+          } catch {
+            continue;
+          }
+        }
+        if (h === e.source_sha256) {
+          sources[e.source_sha256] = toBase64(bytes);
+          matched = true;
+        }
       }
+      if (matched) added++;
+      else skipped++;
     }
     await chrome.storage.local.set({ sources });
     $("sources-status").textContent = `保存 ${added} 件` + (skipped ? `・どの登録とも中身が一致しないため保存しなかったもの ${skipped} 件` : "");

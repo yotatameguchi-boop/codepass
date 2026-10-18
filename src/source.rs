@@ -16,16 +16,37 @@ pub struct Loaded {
 }
 
 pub fn load(path: &Path, git_rev: Option<&str>) -> Result<Loaded> {
+    load_material(path, git_rev, None)
+}
+
+/// Like `load`, with `material` choosing how the bytes become the hash
+/// (None = the bytes themselves, Some("syntax-v1") = crate::syntax).
+pub fn load_material(path: &Path, git_rev: Option<&str>, material: Option<&str>) -> Result<Loaded> {
+    let (bytes, git_commit) = read_bytes(path, git_rev)?;
+    let sha256 = material_hash(&bytes, path, material)?;
+    Ok(Loaded { sha256, path: absolute(path)?, git_commit })
+}
+
+/// The file's bytes, from the working tree or from a commit (with its full id).
+pub fn read_bytes(path: &Path, git_rev: Option<&str>) -> Result<(Vec<u8>, Option<String>)> {
     match git_rev {
-        None => Ok(Loaded { sha256: crate::source_hash(path)?, path: absolute(path)?, git_commit: None }),
+        None => Ok((crate::read_source(path)?, None)),
         Some(rev) => {
             let (commit, bytes) = read_git(path, rev)?;
-            Ok(Loaded {
-                sha256: Sha256::digest(bytes).into(),
-                path: absolute(path)?,
-                git_commit: Some(commit),
-            })
+            Ok((bytes, Some(commit)))
         }
+    }
+}
+
+pub fn material_hash(bytes: &[u8], path: &Path, material: Option<&str>) -> Result<[u8; 32]> {
+    match material {
+        None => Ok(Sha256::digest(bytes).into()),
+        Some(crate::syntax::MATERIAL_ID) => {
+            let name =
+                path.file_name().and_then(|n| n.to_str()).ok_or("ファイル名はUTF-8である必要があります")?;
+            crate::syntax::hash(bytes, name)
+        }
+        Some(other) => Err(format!("未対応の材料の種類です: {other}")),
     }
 }
 

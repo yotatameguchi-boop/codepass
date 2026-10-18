@@ -94,3 +94,9 @@ td.ok { color: var(--ok); font-weight: 700; white-space: nowrap; }
 td.ng { color: var(--ng); font-weight: 700; white-space: nowrap; }
 footer { margin-top: 32px; color: var(--muted); font-size: 15px; }
 footer a { color: var(--amber); }
+.tokens { margin-top: 14px; background: var(--deep); border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; }
+.tokens summary { cursor: pointer; color: var(--text); font-weight: 700; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; max-height: 220px; overflow: auto; }
+.chips span { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 2px 8px; font-size: 14px; white-space: pre; }
+.chips span.layout { color: var(--amber); border-color: #5c4a24; }
+.hint.changed { color: var(--amber); font-weight: 700; }

@@ -1,4 +1,4 @@
-import init, { generate, site_key, random_salt, self_test } from "./pkg/codepass_web.js";
+import init, { generate, site_key, random_salt, self_test, syntax_preview } from "./pkg/codepass_web.js";
 
 const $ = (id) => document.getElementById(id);
 const encoder = new TextEncoder();
@@ -11,8 +11,36 @@ async function sha256Hex(bytes) {
   return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
+let lastSyntaxHash = "";
+
 async function refreshHash() {
-  $("hash").textContent = "SHA-256: " + (await sha256Hex(sourceBytes)).slice(0, 32) + "…";
+  const syntax = $("material").value === "syntax";
+  $("tokens-box").hidden = !syntax;
+  if (!syntax) {
+    $("hash").textContent = "バイト列の SHA-256: " + (await sha256Hex(sourceBytes)).slice(0, 24) + "…";
+    return;
+  }
+  try {
+    const p = JSON.parse(syntax_preview(new TextDecoder().decode(sourceBytes), $("filename").value));
+    const changed = lastSyntaxHash && lastSyntaxHash !== p.hash;
+    lastSyntaxHash = p.hash;
+    $("hash").textContent = `構文のハッシュ（${p.lang}）: ${p.hash.slice(0, 24)}… ${changed ? "← 変わりました" : ""}`;
+    $("hash").classList.toggle("changed", Boolean(changed));
+    $("token-count").textContent = `${p.tokens.length} 個`;
+    const chips = $("tokens");
+    chips.replaceChildren();
+    for (const t of p.tokens.slice(0, 200)) {
+      const span = document.createElement("span");
+      span.textContent = t === "\u0000NEWLINE" ? "⏎" : t === "\u0000INDENT" ? "⇥" : t === "\u0000DEDENT" ? "⇤" : t;
+      if (t.startsWith("\u0000")) span.className = "layout";
+      chips.append(span);
+    }
+  } catch (e) {
+    $("hash").textContent = "構文として読めません: " + String(e.message ?? e);
+    $("hash").classList.remove("changed");
+    $("tokens").replaceChildren();
+    $("token-count").textContent = "";
+  }
 }
 
 function refreshSiteKey() {
@@ -53,6 +81,8 @@ async function run() {
         $("symbols").value,
         Number($("revision").value),
         $("registered").value,
+        $("material").value === "syntax",
+        $("filename").value,
       ),
     );
     password = out.password;
@@ -112,9 +142,12 @@ async function main() {
     sourceBytes = encoder.encode($("source").value);
     await refreshHash();
   });
+  $("material").addEventListener("change", refreshHash);
+  $("filename").addEventListener("input", refreshHash);
   $("file").addEventListener("change", async () => {
     const f = $("file").files[0];
     if (!f) return;
+    $("filename").value = f.name;
     sourceBytes = new Uint8Array(await f.arrayBuffer());
     $("source").value = f.size <= 20000 ? new TextDecoder().decode(sourceBytes) : `（${f.name}・${f.size} バイト）`;
     await refreshHash();

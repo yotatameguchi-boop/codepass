@@ -70,6 +70,13 @@ jobs:
           python-version: "3.12"
       - run: pip install argon2-cffi==23.1.0
       - run: python docs/reference.py | diff - docs/reference-expected.txt
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+      - name: Syntax material, Rust vs Python on 30,000 random inputs
+        run: |
+          python docs/syntax_corpus.py corpus > corpus.jsonl
+          cargo run --locked -q --example syntax_hash < corpus.jsonl > rust.txt
+          python docs/syntax_corpus.py hash < corpus.jsonl > python.txt
+          diff rust.txt python.txt
   fuzz:
     runs-on: ubuntu-latest
     steps:
@@ -84,7 +91,7 @@ jobs:
         env:
           SECONDS_EACH: ${{ github.event_name == 'schedule' && '600' || '45' }}
         run: |
-          for t in profile_json site_normalize derive_rules entry_mac; do
+          for t in profile_json site_normalize derive_rules entry_mac syntax_lexer; do
             cargo +nightly fuzz run "$t" -- -max_total_time="$SECONDS_EACH"
           done
   kani:

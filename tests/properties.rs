@@ -85,3 +85,81 @@ fn characters_are_uniform() {
     let chi2: f64 = used.iter().map(|&c| (c as f64 - expected).powi(2) / expected).sum();
     assert!(chi2 < 130.0, "chi-square {chi2}");
 }
+
+mod syntax_material {
+    use codepass::syntax;
+    use proptest::prelude::*;
+
+    const TOKENS: &[&str] = &[
+        "a",
+        "b1",
+        "_x",
+        "$el",
+        "名前",
+        "return",
+        "if",
+        "(",
+        ")",
+        "{",
+        "}",
+        "[",
+        "]",
+        "+",
+        "-",
+        "*",
+        "/",
+        "=",
+        ";",
+        ":",
+        "<",
+        ">",
+        "!",
+        "&",
+        "|",
+        ".",
+        ",",
+        "\"s\"",
+        "\"a // b\"",
+        "'q'",
+        "`t ${x}`",
+        "1",
+        "0x1F",
+    ];
+    const SEPARATORS: &[&str] =
+        &[" ", "  ", "\n", "\r\n", "\t", " /* note */ ", " // note\n", "\n\n    ", " /**/ "];
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(512))]
+
+        /// Layout and comments never change the syntax hash (JavaScript rules).
+        #[test]
+        fn layout_and_comments_do_not_matter(
+            toks in proptest::collection::vec(proptest::sample::select(TOKENS), 1..40),
+            seps in proptest::collection::vec(proptest::sample::select(SEPARATORS), 40),
+        ) {
+            let compact = toks.join(" ");
+            let noisy: String = toks.iter().enumerate().map(|(i, t)| format!("{t}{}", seps[i])).collect();
+            prop_assert_eq!(
+                syntax::hash(compact.as_bytes(), "a.js").unwrap(),
+                syntax::hash(noisy.as_bytes(), "a.js").unwrap(),
+                "{:?}", noisy
+            );
+        }
+
+        /// Changing any one token changes the hash.
+        #[test]
+        fn a_changed_token_changes_the_hash(
+            toks in proptest::collection::vec(proptest::sample::select(TOKENS), 1..40),
+            at in any::<prop::sample::Index>(),
+        ) {
+            let i = at.index(toks.len());
+            prop_assume!(!matches!(toks[i], "," | ")" | "]" | "}"));
+            let mut changed = toks.clone();
+            changed[i] = "zz_changed";
+            prop_assert_ne!(
+                syntax::hash(toks.join(" ").as_bytes(), "a.js").unwrap(),
+                syntax::hash(changed.join(" ").as_bytes(), "a.js").unwrap()
+            );
+        }
+    }
+}

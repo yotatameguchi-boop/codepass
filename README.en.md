@@ -18,6 +18,21 @@ source code + master secret + site → password
 > **Experimental.** The cryptographic design has not had an external review yet; do not use it for important accounts.
 > Source code is not treated as a secret (it may be public). Security rests on the master secret, and optionally a security key.
 
+## The code's meaning is the key
+
+Register with `--material syntax` and the password follows the code's **syntax**, not its bytes:
+adding comments, re-indenting, reformatting or adding trailing commas gives the **same** password;
+renaming, changing logic or a string literal gives a **different** one.
+
+```sh
+codepass generate main.rs --site github.com --material syntax
+codepass inspect main.rs     # show which tokens count
+```
+
+Rust, Python, JS/TS, Go, C/C++/C#/Java, Kotlin/Scala/Swift/Dart. A small lexer fully specified in docs/SPEC.md — not a
+parser whose upgrades could change passwords — reproduced byte for byte by an independent Python implementation
+(30,000 random inputs compared in CI).
+
 ## Why source code?
 
 Developers carry their code everywhere, version it with Git, and often care about a particular file (a first program,
@@ -43,7 +58,7 @@ Prebuilt binaries for macOS, Linux and Windows, and the browser extension, are o
 provenance and an SBOM:
 
 ```sh
-gh attestation verify codepass-v0.4.0-aarch64-apple-darwin.tar.gz -R yotatameguchi-boop/codepass
+gh attestation verify codepass-v0.5.0-aarch64-apple-darwin.tar.gz -R yotatameguchi-boop/codepass
 ```
 
 ## Use
@@ -78,7 +93,7 @@ See [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) (Japanese) for assets, attacker
 - [docs/SPEC.md](docs/SPEC.md) (Japanese) specifies every byte; [docs/reference.py](docs/reference.py), written from the
   spec alone, must match [tests/vectors.rs](tests/vectors.rs) — checked in CI.
 - **Kani** proves the rejection sampler is exactly uniform for every alphabet size CodePass uses (62–94).
-- Four **cargo-fuzz** targets run on every push (45 s each) and weekly (10 min each). Fuzzing has already found and
+- Five **cargo-fuzz** targets run on every push (45 s each) and weekly (10 min each). Fuzzing has already found and
   fixed a real idempotence bug in host normalization.
 - proptest, a chi-square test, and CI on Linux, macOS and Windows.
 

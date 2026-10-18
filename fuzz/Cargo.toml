@@ -45,5 +45,12 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "syntax_lexer"
+path = "fuzz_targets/syntax_lexer.rs"
+test = false
+doc = false
+bench = false
+
 # Built separately with cargo-fuzz (nightly), outside the main workspace.
 [workspace]

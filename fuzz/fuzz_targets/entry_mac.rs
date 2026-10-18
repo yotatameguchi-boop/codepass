@@ -30,6 +30,7 @@ fuzz_target!(|data: &[u8]| {
         source_path: (data[36] & 1 == 0).then(|| format!("/k/{}", data[37])),
         git_commit: None,
         mac: None,
+        material: None,
     };
     entry.sign(&key);
     assert!(matches!(entry.verify(&key), MacStatus::Valid));
