@@ -60,12 +60,13 @@ pub const INDENT: &str = "\u{0}INDENT";
 pub const DEDENT: &str = "\u{0}DEDENT";
 
 /// Whitespace for this lexer: the ASCII set plus Unicode White_Space above U+007F,
-/// listed explicitly so every implementation agrees.
+/// and the invisible U+FEFF (a byte-order mark anywhere, not only at the start —
+/// found by fuzzing), listed explicitly so every implementation agrees.
 pub fn is_space(c: char) -> bool {
     matches!(
         c,
         ' ' | '\t' | '\n' | '\r' | '\u{b}' | '\u{c}' | '\u{85}' | '\u{a0}' | '\u{1680}' | '\u{2000}'
-            ..='\u{200a}' | '\u{2028}' | '\u{2029}' | '\u{202f}' | '\u{205f}' | '\u{3000}'
+            ..='\u{200a}' | '\u{2028}' | '\u{2029}' | '\u{202f}' | '\u{205f}' | '\u{3000}' | '\u{feff}'
     )
 }
 

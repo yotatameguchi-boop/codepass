@@ -14,7 +14,7 @@ LANGS = {
     "nested-c": ["kt", "kts", "scala", "swift", "dart"],
     "python": ["py", "pyi"],
 }
-SPACES = set(" \t\n\r\x0b\x0c\x85\xa0     　") | {chr(c) for c in range(0x2000, 0x200B)}
+SPACES = set(" \t\n\r\x0b\x0c\x85\xa0\u1680\u2028\u2029\u202f\u205f\u3000\ufeff") | {chr(c) for c in range(0x2000, 0x200B)}
 
 
 class SyntaxError_(Exception):
