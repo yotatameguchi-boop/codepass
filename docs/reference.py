@@ -47,7 +47,8 @@ def site_pass_v2(site):
     while t and (t[-1] == "." or t[-1].isspace()): t = t[:-1]
     h = unicodedata.normalize("NFKC", t.lower())
     while h and (h[-1] == "." or h[-1].isspace()): h = h[:-1]
-    return h[4:] if h.startswith("www.") and "." in h[4:] else h
+    while h.startswith("www.") and "." in h[4:]: h = h[4:]
+    return h
 
 
 def gen(master, code_hash, site, acct, length, cs, rev, req, ver=1, symbols=None):

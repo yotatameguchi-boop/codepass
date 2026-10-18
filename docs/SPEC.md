@@ -44,7 +44,7 @@ v1とv2の違いは「識別子の正規化」「context」「記号の集合」
 5. 最後の `:` より後ろが1文字以上の ASCII 数字で、その前が `:` を含まない（または `[` で始まり `]` で終わる）なら、`:` 以降を除く
 6. 先頭の空白と、末尾の `.` と空白を除く
 7. Unicode の小文字化（`String::to_lowercase` / Python `str.lower`）をしてから NFKC に正規化し、もう一度末尾の `.` と空白を除く
-8. `www.` で始まり、残りに `.` を含むなら `www.` を除く
+8. `www.` で始まり、残りに `.` を含む間、先頭の `www.` を除き続ける（v0.3 で修正。v0.2 までは1回だけ除いていたため、`www.` が10個以上続く名前だけ結果が違う）
 
 例: `https://user@WWW.GitHub.com:443/login?x` → `github.com`、`ＧｉｔＨｕｂ．ｃｏｍ` → `github.com`、
 `Bücher.example` → `bücher.example`、`My Bank` → `my bank`。

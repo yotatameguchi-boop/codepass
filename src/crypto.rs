@@ -146,21 +146,42 @@ fn site_pass_v2(site: &str) -> String {
     let t = t.trim_start().trim_end_matches(|c: char| c == '.' || c.is_whitespace());
     let host: String = t.to_lowercase().nfkc().collect();
     let host = host.trim_end_matches(|c: char| c == '.' || c.is_whitespace()).to_string();
-    match host.strip_prefix("www.") {
-        Some(rest) if rest.contains('.') => rest.to_string(),
-        _ => host,
+    // Every leading "www." goes in one pass (found by fuzzing: one per pass ran out
+    // of passes at ten or more and broke idempotence).
+    let mut host = host.as_str();
+    while let Some(rest) = host.strip_prefix("www.").filter(|rest| rest.contains('.')) {
+        host = rest;
     }
+    host.to_string()
 }
 
 /// Sorted, de-duplicated ASCII punctuation, so the same set always encodes the same way.
 pub fn canonical_symbols(symbols: &str) -> Result<String> {
-    let mut bytes: Vec<u8> = symbols.bytes().collect();
-    if bytes.is_empty() || !bytes.iter().all(u8::is_ascii_punctuation) {
-        return Err("--symbols には空白以外のASCII記号を1文字以上指定してください".into());
+    canonical_symbol_bytes(symbols.as_bytes())
+        .map(|bytes| String::from_utf8(bytes).expect("ASCII"))
+        .ok_or_else(|| "--symbols には空白以外のASCII記号を1文字以上指定してください".into())
+}
+
+/// Marks each byte in a 128-slot table and reads the table back in order: sorted and
+/// de-duplicated without a sort, so the result is easy to prove (Kani) and fast.
+fn canonical_symbol_bytes(input: &[u8]) -> Option<Vec<u8>> {
+    let table = symbol_table(input)?;
+    Some((0..128u8).filter(|&b| table[b as usize]).collect())
+}
+
+/// `table[c]` is true exactly when `c` is in `input`; None unless every byte is ASCII punctuation.
+fn symbol_table(input: &[u8]) -> Option<[bool; 128]> {
+    if input.is_empty() {
+        return None;
     }
-    bytes.sort_unstable();
-    bytes.dedup();
-    Ok(String::from_utf8(bytes).expect("ASCII"))
+    let mut table = [false; 128];
+    for &b in input {
+        if !b.is_ascii_punctuation() {
+            return None;
+        }
+        table[b as usize] = true;
+    }
+    Some(table)
 }
 
 pub fn validate_secret(secret: &str) -> Result<()> {
@@ -390,26 +411,26 @@ mod proofs {
         }
     }
 
-    /// A symbol set is accepted only as non-empty ASCII punctuation, and comes back
-    /// strictly sorted (so equal sets always encode to the same bytes).
+    /// The symbol table holds exactly the symbols given, and only ASCII punctuation:
+    /// nothing is dropped or added. (Reading the table back in index order is what
+    /// makes the result sorted and de-duplicated.)
     #[kani::proof]
-    #[kani::unwind(5)]
-    fn canonical_symbols_is_sorted_punctuation() {
-        let bytes: [u8; 3] = kani::any();
+    #[kani::unwind(4)]
+    fn symbol_table_is_exactly_the_input() {
+        let input: [u8; 3] = kani::any();
         let len: usize = kani::any();
-        kani::assume(len <= 3);
-        let Ok(input) = std::str::from_utf8(&bytes[..len]) else { return };
-        if let Ok(out) = canonical_symbols(input) {
-            let out = out.as_bytes();
-            assert!(!out.is_empty());
-            let mut i = 0;
-            while i < out.len() {
-                assert!(out[i].is_ascii_punctuation());
-                if i > 0 {
-                    assert!(out[i - 1] < out[i]);
+        kani::assume((1..=3).contains(&len));
+        let c: u8 = kani::any();
+        kani::assume(c < 128);
+        let given = &input[..len];
+        match symbol_table(given) {
+            Some(table) => {
+                assert_eq!(table[c as usize], given.contains(&c));
+                if table[c as usize] {
+                    assert!(c.is_ascii_punctuation());
                 }
-                i += 1;
             }
+            None => assert!(given.iter().any(|b| !b.is_ascii_punctuation())),
         }
     }
 }
@@ -493,6 +514,9 @@ mod tests {
         assert_eq!(normalize_site_v2("https://Bücher.example/"), "bücher.example");
         assert_eq!(normalize_site_v2("ＧｉｔＨｕｂ．ｃｏｍ"), "github.com");
         assert_eq!(normalize_site_v2("www.com"), "www.com");
+        let many = format!("{}example.com", "www.".repeat(12));
+        assert_eq!(normalize_site_v2(&many), "example.com");
+        assert_eq!(normalize_site_v2("www.www.com"), "www.com");
         assert_eq!(normalize_site_v2("My Bank"), "my bank");
         assert_eq!(normalize_site_v2("[::1]:8080"), "[::1]");
         // v1 keeps case, so existing passwords do not change.
@@ -528,6 +552,25 @@ mod tests {
         assert!(secret_warning("passwordpassword", &[]).is_some());
         assert!(secret_warning("orbit velvet quartz lagoon pickle saddle", &[]).is_none());
     }
+    /// Exhaustive, so a proof: for every alphabet size 1..=256, every position is hit
+    /// by exactly 256 / n of the 256 byte values, and fewer than n values are rejected.
+    #[test]
+    fn rejection_sampling_is_exactly_uniform_for_every_size() {
+        let alphabet: Vec<u8> = (0..=255).collect();
+        for n in 1..=256usize {
+            let mut hits = vec![0usize; n];
+            let mut rejected = 0;
+            for b in 0..=255u8 {
+                match pick(b, &alphabet[..n]) {
+                    Some(c) => hits[c as usize] += 1,
+                    None => rejected += 1,
+                }
+            }
+            assert!(hits.iter().all(|&h| h == 256 / n), "n = {n}");
+            assert!(rejected < n, "n = {n}");
+        }
+    }
+
     #[test]
     fn check_code_words_are_distinct() {
         let mut words = crate::words::WORDS.to_vec();
