@@ -1,7 +1,10 @@
 use clap::{Args, Parser, Subcommand};
 use codepass::{
     crypto::{self, Charset, Settings},
-    profile::{self, Entry, Saved},
+    harden::{self, Locked, LockedString},
+    hardware::{self, SecurityKey},
+    phishing,
+    profile::{self, Entry, MacStatus, Saved},
     source, Result,
 };
 use std::{
@@ -35,7 +38,10 @@ struct Output {
 #[derive(Subcommand)]
 enum Command {
     #[command(about = "saltを生成して初期設定を作る")]
-    Init,
+    Init {
+        #[arg(long, help = "FIDO2セキュリティキーを第2の要素として登録する（fido2機能付きのビルドが必要）")]
+        hardware_key: bool,
+    },
     #[command(about = "ソースコードからパスワードを生成し、設定を登録する")]
     Generate {
         source: PathBuf,
@@ -67,6 +73,8 @@ enum Command {
         replace: bool,
         #[arg(long, help = "今回の非秘密設定とsaltを新規ファイルにエクスポート")]
         export_settings: Option<PathBuf>,
+        #[arg(long, help = "登録済みのサービスと見分けにくい名前でも登録する（フィッシング対策を解除）")]
+        allow_lookalike: bool,
         #[command(flatten)]
         output: Output,
     },
@@ -118,8 +126,18 @@ fn run() -> Result<()> {
         None => profile::default_path()?,
     };
     match cli.command {
-        Command::Init => {
-            profile::save_new(&path, &profile::Profile::new()?)?;
+        Command::Init { hardware_key } => {
+            let mut p = profile::Profile::new()?;
+            if hardware_key {
+                let key = open_security_key()?;
+                let id = key.enroll(hardware::RP_ID)?;
+                p.hardware_key = Some(profile::HardwareKey {
+                    credential_id: hex::encode(id),
+                    rp_id: hardware::RP_ID.into(),
+                });
+                eprintln!("セキュリティキーを登録しました。今後はキーがないとパスワードを作り直せません");
+            }
+            profile::save_new(&path, &p)?;
             eprintln!(
                 "初期設定を作成しました: {}\nprofile exportでsaltをバックアップしてください。",
                 path.display()
@@ -172,7 +190,21 @@ fn run() -> Result<()> {
         },
         Command::Get { site, account, revision, output } => {
             let p = profile::load(&path)?;
-            let e = p.find(&site, &account, revision)?;
+            let e = match p.find(&site, &account, revision) {
+                Ok(e) => e,
+                Err(not_found) => {
+                    let key = crypto::site_key(&site, crypto::LATEST_SPEC);
+                    let look = phishing::lookalikes(&key, registered_sites(&p).iter().map(String::as_str));
+                    if !look.is_empty() {
+                        return Err(format!(
+                            "「{key}」は登録済みの「{}」と見た目がそっくりな別のドメインです。\
+                            フィッシングサイトの可能性が高いので、パスワードは出しません",
+                            look.join("」「")
+                        ));
+                    }
+                    return Err(not_found);
+                }
+            };
             let file = e
                 .source_path
                 .as_ref()
@@ -184,7 +216,10 @@ fn run() -> Result<()> {
                     元の内容に戻すか、次からは --git でコミットを指定して登録してください"
                 ));
             }
-            let password = prompt_and_derive(&p, &loaded.sha256, &e.settings)?;
+            let master = unlock(&p, &e.settings)?;
+            check_entry(e, &master)?;
+            let password = crypto::derive_with_master(&master, &loaded.sha256, &e.settings)?;
+            describe(&loaded.sha256, &e.settings);
             present(&password, e.settings.length, &output)?;
         }
         Command::Regenerate { source, entry, output } => {
@@ -200,7 +235,10 @@ fn run() -> Result<()> {
                         .into(),
                 );
             }
-            let password = prompt_and_derive(&p, &loaded.sha256, &e.settings)?;
+            let master = unlock(&p, &e.settings)?;
+            check_entry(e, &master)?;
+            let password = crypto::derive_with_master(&master, &loaded.sha256, &e.settings)?;
+            describe(&loaded.sha256, &e.settings);
             present(&password, e.settings.length, &output)?;
         }
         Command::Generate {
@@ -217,6 +255,7 @@ fn run() -> Result<()> {
             no_save,
             replace,
             export_settings,
+            allow_lookalike,
             output,
         } => {
             let symbols = symbols.as_deref().map(crypto::canonical_symbols).transpose()?;
@@ -239,16 +278,30 @@ fn run() -> Result<()> {
                 );
             }
             let mut p = profile::load(&path)?;
+            for warning in phishing::suspicious_parts(&settings.site_key()) {
+                eprintln!("警告: {warning}");
+            }
+            let look =
+                phishing::lookalikes(&settings.site_key(), registered_sites(&p).iter().map(String::as_str));
+            if !look.is_empty() && !allow_lookalike {
+                return Err(format!(
+                    "「{}」は登録済みの「{}」と見た目がそっくりです。フィッシングサイトのURLではないか確かめてください。\n  \
+                    本当に別のサービスなら --allow-lookalike を付けてください",
+                    settings.site_key(),
+                    look.join("」「")
+                ));
+            }
             let loaded = source::load(&source, git.as_deref())?;
             let source_path = loaded.path.to_str().map(str::to_string);
             if source_path.is_none() && !no_save {
                 eprintln!("警告: パスがUTF-8でないため、ファイルの場所は記録しません");
             }
-            let entry = Entry {
+            let mut entry = Entry {
                 source_sha256: hex::encode(loaded.sha256),
                 settings: settings.clone(),
                 source_path,
                 git_commit: loaded.git_commit.clone(),
+                mac: None,
             };
             // Check before asking for the secret: a mismatch usually means the file changed.
             if !no_save && !replace {
@@ -284,7 +337,10 @@ fn run() -> Result<()> {
                     ));
                 }
             }
-            let password = prompt_and_derive(&p, &loaded.sha256, &settings)?;
+            let master = unlock(&p, &settings)?;
+            let password = crypto::derive_with_master(&master, &loaded.sha256, &settings)?;
+            describe(&loaded.sha256, &settings);
+            entry.sign(&*crypto::entry_mac_key(&master)?);
             if !no_save {
                 match profile::update(&path, |p| Ok(p.upsert(entry.clone(), replace)))? {
                     Saved::Added => eprintln!(
@@ -307,11 +363,23 @@ fn run() -> Result<()> {
     Ok(())
 }
 
-fn prompt_and_derive(
-    p: &profile::Profile,
-    hash: &[u8; 32],
-    settings: &Settings,
-) -> Result<Zeroizing<String>> {
+fn registered_sites(p: &profile::Profile) -> Vec<String> {
+    p.entries.iter().map(|e| e.settings.site_key()).collect()
+}
+
+#[cfg(feature = "fido2")]
+fn open_security_key() -> Result<Box<dyn SecurityKey>> {
+    Ok(Box::new(hardware::Fido2Key::open()?))
+}
+
+#[cfg(not(feature = "fido2"))]
+fn open_security_key() -> Result<Box<dyn SecurityKey>> {
+    Err("このビルドはセキュリティキーに対応していません。cargo install codepass --features fido2 で入れ直してください".into())
+}
+
+/// Asks for the secret (and the security key, if enrolled) and returns the master key,
+/// kept in locked memory and zeroed when dropped.
+fn unlock(p: &profile::Profile, settings: &Settings) -> Result<Locked<[u8; 32]>> {
     settings.validate()?;
     if !io::stdin().is_terminal() {
         return Err("マスターシークレットは対話端末から入力してください".into());
@@ -319,22 +387,54 @@ fn prompt_and_derive(
     if settings.length < 15 {
         eprintln!("警告: 15文字未満です。20文字以上を推奨します。");
     }
-    let secret = Zeroizing::new(
+    let secret = LockedString::new(
         rpassword::prompt_password("Master secret: ").map_err(|_| "非表示入力に失敗しました")?,
     );
-    let master = crypto::master_key(&secret, &p.salt_bytes()?)?;
+    let salt = p.salt_bytes()?;
+    let mut master = Locked::new(*crypto::master_key(&secret, &salt)?);
     if let Some(warning) = crypto::secret_warning(&secret, &["codepass", &settings.site, &settings.account]) {
         eprintln!("{warning}");
     }
+    drop(secret);
+    if let Some(hw) = &p.hardware_key {
+        let id = hex::decode(&hw.credential_id).map_err(|_| "セキュリティキーの設定が不正です")?;
+        let answer = Locked::new(open_security_key()?.hmac_secret(
+            &hw.rp_id,
+            &id,
+            &crypto::hardware_challenge(&salt),
+        )?);
+        master = Locked::new(*crypto::with_hardware(&master, &answer)?);
+    }
+    if !master.is_locked() {
+        eprintln!("注意: 秘密情報をメモリに固定できませんでした（スワップに書き出される可能性があります）");
+    }
     eprintln!("確認コード: {}（いつもと違えば打ち間違いです）", crypto::check_code(&master)?);
-    let password = crypto::derive_with_master(&master, hash, settings)?;
+    Ok(master)
+}
+
+/// A registered entry must carry a valid signature from this master key.
+fn check_entry(e: &Entry, master: &[u8; 32]) -> Result<()> {
+    match e.verify(&*crypto::entry_mac_key(master)?) {
+        MacStatus::Valid => Ok(()),
+        MacStatus::Missing => {
+            eprintln!(
+                "注意: この登録には改ざん検知の署名がありません（v0.2以前の登録）。generate し直すと付きます"
+            );
+            Ok(())
+        }
+        MacStatus::Invalid => Err("登録内容の署名が合いません。マスターシークレットの打ち間違いか、\
+            設定ファイルが書き換えられた可能性があります。確認コードを確かめてください"
+            .into()),
+    }
+}
+
+fn describe(hash: &[u8; 32], settings: &Settings) {
     eprintln!(
         "仕様: v{} / コードSHA-256: {} / 更新番号: {}",
         settings.spec_version,
         hex::encode(hash),
         settings.revision
     );
-    Ok(password)
 }
 
 fn present(password: &str, length: usize, output: &Output) -> Result<()> {
@@ -404,6 +504,10 @@ fn copy_to_clipboard(password: &str, clear_after: u64) -> Result<()> {
 }
 
 fn main() {
+    let failed = harden::harden_process();
+    if !failed.is_empty() {
+        eprintln!("注意: {}を設定できませんでした", failed.join("・"));
+    }
     if let Err(message) = run() {
         eprintln!("codepass: {}", message);
         std::process::exit(1);

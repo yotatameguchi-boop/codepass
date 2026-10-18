@@ -1,8 +1,10 @@
 use crate::{
-    crypto::{account_key, site_key, Settings},
+    crypto::{account_key, site_key, Charset, Settings},
     Result,
 };
+use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
+use sha2::Sha256;
 use std::{
     fs::{self, OpenOptions},
     io::{Read, Write},
@@ -16,6 +18,18 @@ pub struct Profile {
     pub spec_version: u32,
     pub salt: String,
     pub entries: Vec<Entry>,
+    /// A FIDO2 security key whose hmac-secret output is mixed into the master key (format 3+).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hardware_key: Option<HardwareKey>,
+}
+
+/// Non-secret handle to the credential on the security key. Without the physical key
+/// it is useless; with it, it is required to reproduce every password.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HardwareKey {
+    pub credential_id: String,
+    pub rp_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -29,9 +43,71 @@ pub struct Entry {
     /// Full commit hash when the code was read from Git (format 2+).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub git_commit: Option<String>,
+    /// HMAC-SHA256 over every other field, keyed from the master key (format 3+).
+    /// Detects edits to the file, and proves the secret was typed correctly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mac: Option<String>,
+}
+
+pub enum MacStatus {
+    Valid,
+    Missing,
+    Invalid,
+}
+
+fn put(out: &mut Vec<u8>, bytes: &[u8]) {
+    out.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
+    out.extend_from_slice(bytes);
+}
+
+fn put_opt(out: &mut Vec<u8>, value: &Option<String>) {
+    match value {
+        None => out.push(0),
+        Some(v) => {
+            out.push(1);
+            put(out, v.as_bytes());
+        }
+    }
 }
 
 impl Entry {
+    /// The exact bytes the MAC covers (docs/SPEC.md, "設定の改ざん検知").
+    pub fn mac_input(&self) -> Vec<u8> {
+        let s = &self.settings;
+        let mut out = b"CodePass/entry/v1\0".to_vec();
+        put(&mut out, self.source_sha256.to_ascii_lowercase().as_bytes());
+        put(&mut out, s.site.as_bytes());
+        put(&mut out, s.account.as_bytes());
+        out.extend_from_slice(&(s.length as u32).to_be_bytes());
+        out.push(match s.charset {
+            Charset::Strong => 1,
+            Charset::Alnum => 2,
+        });
+        out.extend_from_slice(&s.revision.to_be_bytes());
+        out.push(u8::from(s.require_classes));
+        out.extend_from_slice(&s.spec_version.to_be_bytes());
+        put_opt(&mut out, &s.symbols);
+        put_opt(&mut out, &self.source_path);
+        put_opt(&mut out, &self.git_commit);
+        out
+    }
+    pub fn sign(&mut self, key: &[u8; 32]) {
+        let mut mac = Hmac::<Sha256>::new_from_slice(key).expect("any key length");
+        mac.update(&self.mac_input());
+        self.mac = Some(hex::encode(mac.finalize().into_bytes()));
+    }
+    pub fn verify(&self, key: &[u8; 32]) -> MacStatus {
+        let Some(tag) = self.mac.as_deref().and_then(|t| hex::decode(t).ok()) else {
+            return if self.mac.is_none() { MacStatus::Missing } else { MacStatus::Invalid };
+        };
+        let mut mac = Hmac::<Sha256>::new_from_slice(key).expect("any key length");
+        mac.update(&self.mac_input());
+        // verify_slice compares in constant time.
+        match mac.verify_slice(&tag) {
+            Ok(()) => MacStatus::Valid,
+            Err(_) => MacStatus::Invalid,
+        }
+    }
     /// Same site and account, comparing under either entry's spec version.
     pub fn same_service(&self, other: &Settings) -> bool {
         let s = &self.settings;
@@ -68,7 +144,13 @@ impl Profile {
     pub fn new() -> Result<Self> {
         let mut salt = [0u8; 16];
         getrandom::getrandom(&mut salt).map_err(|_| "安全な乱数を取得できません")?;
-        Ok(Self { format_version: 2, spec_version: 1, salt: hex::encode(salt), entries: vec![] })
+        Ok(Self {
+            format_version: 3,
+            spec_version: 1,
+            salt: hex::encode(salt),
+            entries: vec![],
+            hardware_key: None,
+        })
     }
     pub fn salt_bytes(&self) -> Result<[u8; 16]> {
         let bytes = hex::decode(&self.salt).map_err(|_| "saltの形式が不正です")?;
@@ -83,7 +165,7 @@ impl Profile {
                 Saved::Added
             }
             Some(e) if e.same_password(&entry) => {
-                if e.source_path.is_none() || entry.git_commit.is_some() {
+                if e.source_path.is_none() || entry.git_commit.is_some() || e.mac.is_none() {
                     *e = entry;
                 }
                 Saved::Unchanged
@@ -125,7 +207,7 @@ impl Profile {
     }
 
     pub fn validate(&self) -> Result<()> {
-        if !(1..=2).contains(&self.format_version) || self.spec_version != 1 {
+        if !(1..=3).contains(&self.format_version) || self.spec_version != 1 {
             return Err("未対応のプロファイルバージョンです。codepass を更新してください".into());
         }
         self.salt_bytes()?;
@@ -145,6 +227,16 @@ impl Profile {
                 !(c.len() == 40 || c.len() == 64) || !c.bytes().all(|b| b.is_ascii_hexdigit())
             }) {
                 return Err("GitのコミットIDが不正です".into());
+            }
+            if entry.mac.as_ref().is_some_and(|m| m.len() != 64 || !m.bytes().all(|b| b.is_ascii_hexdigit()))
+            {
+                return Err("設定の署名の形式が不正です".into());
+            }
+        }
+        if let Some(key) = &self.hardware_key {
+            let id_ok = hex::decode(&key.credential_id).is_ok_and(|id| (16..=1023).contains(&id.len()));
+            if !id_ok || key.rp_id.is_empty() || key.rp_id.len() > 253 || !key.rp_id.is_ascii() {
+                return Err("セキュリティキーの設定が不正です".into());
             }
         }
         Ok(())
@@ -195,12 +287,12 @@ pub fn save_new(path: &Path, profile: &Profile) -> Result<()> {
 /// file is replaced atomically so a crash leaves either the old or the new version.
 pub fn update<T>(path: &Path, f: impl FnOnce(&mut Profile) -> Result<T>) -> Result<T> {
     let mut profile = load(path)?;
-    let salt = profile.salt.clone();
+    let (salt, hardware_key) = (profile.salt.clone(), profile.hardware_key.clone());
     let out = f(&mut profile)?;
-    if profile.salt != salt {
-        return Err("saltは変更できません".into());
+    if profile.salt != salt || profile.hardware_key != hardware_key {
+        return Err("saltとセキュリティキーの設定は変更できません".into());
     }
-    profile.format_version = 2;
+    profile.format_version = 3;
     let mut nonce = [0u8; 8];
     getrandom::getrandom(&mut nonce).map_err(|_| "安全な乱数を取得できません")?;
     let mut tmp = path.as_os_str().to_owned();
@@ -240,6 +332,7 @@ mod tests {
             source_sha256: hex::encode([hash; 32]),
             source_path: Some("/x/main.rs".into()),
             git_commit: None,
+            mac: None,
             settings: Settings {
                 site: site.into(),
                 account: "".into(),
@@ -251,6 +344,46 @@ mod tests {
                 symbols: None,
             },
         }
+    }
+
+    #[test]
+    fn entry_signature_detects_any_edit_and_a_wrong_secret() {
+        let key = [3u8; 32];
+        let mut e = entry("github.com", 1, 1);
+        assert!(matches!(e.verify(&key), MacStatus::Missing));
+        e.sign(&key);
+        assert!(matches!(e.verify(&key), MacStatus::Valid));
+        assert!(matches!(e.verify(&[4u8; 32]), MacStatus::Invalid), "another master key (typo) fails");
+        let edits: [fn(&mut Entry); 6] = [
+            |e| e.settings.site = "evil.example".into(),
+            |e| e.settings.length = 8,
+            |e| e.settings.revision = 2,
+            |e| e.source_path = Some("/tmp/attacker.rs".into()),
+            |e| e.git_commit = Some("a".repeat(40)),
+            |e| e.source_sha256 = hex::encode([2u8; 32]),
+        ];
+        for edit in edits {
+            let mut t = e.clone();
+            edit(&mut t);
+            assert!(matches!(t.verify(&key), MacStatus::Invalid));
+        }
+        // Case of the hash does not matter (it is compared case-insensitively elsewhere).
+        let mut upper = e.clone();
+        upper.source_sha256 = upper.source_sha256.to_uppercase();
+        assert!(matches!(upper.verify(&key), MacStatus::Valid));
+    }
+
+    #[test]
+    fn update_refuses_to_change_the_hardware_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("profile.json");
+        save_new(&path, &Profile::new().unwrap()).unwrap();
+        let result = update(&path, |p| {
+            p.hardware_key = Some(HardwareKey { credential_id: "00".repeat(32), rp_id: "codepass".into() });
+            Ok(())
+        });
+        assert!(result.is_err());
+        assert!(load(&path).unwrap().hardware_key.is_none());
     }
 
     #[test]

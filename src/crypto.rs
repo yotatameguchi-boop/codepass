@@ -237,6 +237,37 @@ pub fn derive_with_master(
     render(&key, settings)
 }
 
+/// Key for signing registered entries (profile tamper detection).
+pub fn entry_mac_key(master: &[u8; 32]) -> Result<Zeroizing<[u8; 32]>> {
+    let mut key = Zeroizing::new([0u8; 32]);
+    Hkdf::<Sha256>::new(Some(b"CodePass/HKDF/v1"), master)
+        .expand(b"CodePass/entry-mac/v1", &mut key[..])
+        .map_err(|_| "HKDF処理に失敗しました")?;
+    Ok(key)
+}
+
+/// The 32-byte input sent to the security key's hmac-secret extension. Fixed per
+/// profile, so the key answers the same way every time.
+pub fn hardware_challenge(salt: &[u8; 16]) -> [u8; 32] {
+    let mut h = <Sha256 as sha2::Digest>::new();
+    sha2::Digest::update(&mut h, b"CodePass/hw-challenge/v1\0");
+    sha2::Digest::update(&mut h, salt);
+    sha2::Digest::finalize(h).into()
+}
+
+/// Mixes the security key's answer into the master key: without the physical key,
+/// the secret alone reproduces nothing.
+pub fn with_hardware(master: &[u8; 32], hw_output: &[u8; 32]) -> Result<Zeroizing<[u8; 32]>> {
+    let mut ikm = Zeroizing::new([0u8; 64]);
+    ikm[..32].copy_from_slice(master);
+    ikm[32..].copy_from_slice(hw_output);
+    let mut out = Zeroizing::new([0u8; 32]);
+    Hkdf::<Sha256>::new(Some(b"CodePass/hw-factor/v1"), &ikm[..])
+        .expand(b"CodePass/master/v1", &mut out[..])
+        .map_err(|_| "HKDF処理に失敗しました")?;
+    Ok(out)
+}
+
 /// Three words that depend only on the secret and salt, so a typo shows up as
 /// unfamiliar words. Never stored; 24 bits are far weaker than any generated password.
 pub fn check_code(master: &[u8; 32]) -> Result<String> {

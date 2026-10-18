@@ -1,4 +1,7 @@
 pub mod crypto;
+pub mod harden;
+pub mod hardware;
+pub mod phishing;
 pub mod profile;
 pub mod source;
 mod words;
