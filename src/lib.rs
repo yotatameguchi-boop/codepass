@@ -5,6 +5,7 @@ pub mod phishing;
 pub mod profile;
 pub mod source;
 pub mod syntax;
+pub mod team;
 mod words;
 
 use sha2::{Digest, Sha256};

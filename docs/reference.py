@@ -139,3 +139,12 @@ check = code_check(m, h)
 print("CODE_CHECK", check)
 print("SEALED_MAC", entry_mac(m, "", "github.com", "", 24, "strong", 1, True, 2, None,
                               "/home/me/keys/main.rs", None, check=check))
+
+from reference_team import combine, format_share, parse_share, team_master, verifier  # noqa: E402
+
+shares = [format_share("0badc0de", 2, x, bytes([y]) * 32) for x, y in [(1, 0x45), (2, 0x4C), (3, 0x4B)]]
+print("TEAM_SHARE", shares[0])
+team_secret = combine([parse_share(shares[1]), parse_share(shares[2])])
+assert team_secret == bytes([0x42]) * 32
+print("TEAM_VERIFIER", verifier(team_secret))
+print("TEAM_PASSWORD", gen(team_master(team_secret, b"CodePassTestSalt"), h, "aws.example.com", "root", 24, "strong", 1, True, ver=2))

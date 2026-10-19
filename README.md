@@ -48,6 +48,33 @@ codepass generate main.rs --site github.com --material syntax --seal-code   # �
   短いコードを警告します）。
 - 封印すると、コードをなくしたときにパスワードを作り直せなくなります。コードのバックアップは自分で持ってください。
 
+## 緊急用アカウントを、チームで守る
+
+クラウドの管理者アカウントのような「普段は使わないが、いざというときに必要なアカウント」は、誰か1人に預けると、
+その人が辞めたり忘れたりしたときに困ります。CodePass では、**決めた人数がそろったときだけパスワードを作れる**ようにできます。
+
+```sh
+codepass --config team.json team init --threshold 2 --shares 3   # 3人に共有を配る（2人そろえば使える）
+codepass --config team.json generate infra.rs --site aws.example.com --account root --material syntax --seal-code
+codepass --config team.json get aws.example.com --account root   # 2人がそれぞれ自分の共有を入力
+```
+
+- どの2人の組み合わせでも同じパスワードになり、1人では何もわかりません（Shamir の秘密分散）。チームの秘密そのものはどこにも保存しません。
+- 共有には写し間違いを見つける確認用の文字が付いていて、別の分割の共有を混ぜると拒否します。
+- 共有をなくした人がいれば `team reshare` で配り直せます（パスワードは変わりません）。
+
+## 漏えいしたら、全サービスを順番に更新する
+
+```sh
+codepass rotate plan --reason secret   # 状況（secret / code / member / site）ごとの手順と、影響するサービス
+codepass rotate start --to new.json    # 新しい salt と新しいシークレット（または共有・コード）で新しい設定を作る
+codepass --config new.json rotate next     # 1件ずつ「今のパスワード」と「新しいパスワード」を出す。変更したら done
+codepass --config new.json rotate status   # 進み具合
+```
+
+共有を持っていた人が抜けたときは `rotate start --to new.json --threshold 2 --shares 3` で、チームの秘密ごと新しくします。
+更新が終わると、抜けた人の古い共有は新しい設定では使えません。
+
 ## なぜソースコードなのか
 
 開発者にとってソースコードは、毎日さわっていて、Git で履歴ごと持ち歩けて、思い入れのあるものです
@@ -83,7 +110,7 @@ Releases のファイルには、GitHub Actions がこのリポジトリのソ�
 SLSA build provenance）と、部品表（SBOM）が付いています。GitHub CLI で誰でも確認できます。
 
 ```sh
-gh attestation verify codepass-v0.6.0-aarch64-apple-darwin.tar.gz -R yotatameguchi-boop/codepass
+gh attestation verify codepass-v0.7.0-aarch64-apple-darwin.tar.gz -R yotatameguchi-boop/codepass
 ```
 
 ### ブラウザ拡張（Chrome / Edge）
@@ -186,6 +213,8 @@ codepass --config codepass-backup.json regenerate main.py --entry 1   # ファ�
 |---|---|
 | 漏れたパスワードから他を割り出されない | Argon2id で1回の試行を重くする。`codepass bench` で、総当たりにかかる時間の目安をその場で表示できる |
 | フィッシングサイトにパスワードを出さない | 登録済みサービスと見た目がそっくりな別ドメイン（キリル文字の `і` を使った `gіthub.com`、`paypa1.com` など）を Unicode TR39 で検出し、`get` はパスワードを出さない |
+| 1人では緊急用アカウントを使えないようにする | チームの共有（k 人中の n 人）。抜けた人がいれば秘密ごと一斉更新 |
+| 漏えいの後に、漏れなく更新する | `rotate plan` / `start` / `next` / `status` |
 | 設定ファイルとシークレットを盗まれても再現させない | 材料の封印。設定にはコードのハッシュを残さず、非公開のコードを第2の要素にする |
 | 設定ファイルを書き換えられても気づく | 各登録にマスター鍵から作った HMAC 署名を付け、合わなければパスワードを出さない |
 | シークレットを盗まれても再現されない（任意） | `init --hardware-key` で FIDO2 セキュリティキーを登録すると、キーの中の秘密（取り出せない）が鍵に混ざる |
@@ -257,6 +286,7 @@ SHA-256（コード）→ Argon2id（マスターシークレット, 64MiB / 3�
 | そっくりなドメインの検出（Unicode TR39） | [`unicode-security`](https://crates.io/crates/unicode-security) |
 | セキュリティキー（FIDO2 hmac-secret） | [`ctap-hid-fido2`](https://crates.io/crates/ctap-hid-fido2)（`fido2` 機能） |
 | コアダンプ無効化・メモリ固定 | [`libc`](https://crates.io/crates/libc)（setrlimit / mlock / prctl） |
+| 秘密分散（緊急用アカウント） | [`blahaj`](https://crates.io/crates/blahaj)（Shamir の秘密分散、GF(2^8)） |
 | ブラウザ版デモ・ブラウザ拡張 | WebAssembly ＋ [`wasm-bindgen`](https://crates.io/crates/wasm-bindgen)（[web/](web/)・[extension/](extension/)、Chrome Manifest V3） |
 | Punycode のドメインを元の文字に戻す（照合だけ） | [`idna`](https://crates.io/crates/idna) |
 | 設定ファイル（JSON）の読み書き | [`serde`](https://crates.io/crates/serde) / [`serde_json`](https://crates.io/crates/serde_json) / [`hex`](https://crates.io/crates/hex) |

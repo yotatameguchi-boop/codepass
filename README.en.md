@@ -40,6 +40,19 @@ Normally the settings file keeps the code's hash, so a stolen settings file plus
 so a **private** code file becomes something you *have* — a second factor. Passwords do not change.
 `codepass doctor` warns when the code is short or sits in a repository with a remote.
 
+## Break-glass accounts for teams
+
+`codepass --config team.json team init --threshold 2 --shares 3` splits a random team secret into three shares
+(Shamir, via the `blahaj` crate); any two holders together reproduce the password of an emergency account, one alone
+learns nothing, and the team secret is stored nowhere. Shares carry a checksum against typos.
+
+## Rotating everything after a leak
+
+`codepass rotate plan --reason secret|code|member|site` explains the steps and lists affected sites;
+`rotate start --to new.json` creates a new profile (new salt, new secret or team shares, optionally new code),
+and `rotate next` walks through the sites showing the old and the new password until `rotate status` is done.
+After a member leaves, `rotate start --threshold 2 --shares 3` replaces the team secret: their old share stops working.
+
 ## Why source code?
 
 Developers carry their code everywhere, version it with Git, and often care about a particular file (a first program,
@@ -65,7 +78,7 @@ Prebuilt binaries for macOS, Linux and Windows, and the browser extension, are o
 provenance and an SBOM:
 
 ```sh
-gh attestation verify codepass-v0.6.0-aarch64-apple-darwin.tar.gz -R yotatameguchi-boop/codepass
+gh attestation verify codepass-v0.7.0-aarch64-apple-darwin.tar.gz -R yotatameguchi-boop/codepass
 ```
 
 ## Use

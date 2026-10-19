@@ -259,6 +259,9 @@ fn derive_entry_impl(
     if p.hardware_key.is_some() {
         return Err(err("セキュリティキーを使う設定は、CLI（codepass get）で使ってください"));
     }
+    if p.team.is_some() {
+        return Err(err("チーム（緊急用アカウント）の設定は、共有を持つ人がそろって CLI で使ってください"));
+    }
     let e = p.entries.get(index).ok_or_else(|| err("指定された登録がありません"))?;
     let hash = entry_material_hash(e, source)?;
     if !e.is_sealed() && !e.code_matches(&hash, &[0; 32]) {

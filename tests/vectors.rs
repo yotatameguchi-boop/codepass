@@ -188,3 +188,30 @@ fn sealed_entry_vectors() {
         Some("947c4cb77a079b01028350bf17f228e5fef9ed9f20c9b2fb5c66a3fd09f1c4a1")
     );
 }
+
+#[test]
+fn team_vectors() {
+    use codepass::{crypto, team};
+    // Shares of f(x) = S + A·x over GF(256) (polynomial 0x11d), S = 0x42…, A = 0x07…:
+    // f(1) = 0x45, f(2) = 0x42 ^ 0x0e = 0x4c, f(3) = 0x42 ^ 0x09 = 0x4b in every byte.
+    let secret = [0x42u8; 32];
+    let set_id = "0badc0de";
+    let shares = [(1u8, [0x45u8; 32]), (2, [0x4c; 32]), (3, [0x4b; 32])]
+        .map(|(x, y)| team::format_share(set_id, 2, x, &y));
+    assert_eq!(shares[0], "cpshare1-0badc0de-2-01-45454545-45454545-45454545-45454545-45454545-45454545-45454545-45454545-2d5cf27d");
+    let cfg = team::TeamConfig {
+        threshold: 2,
+        shares: 3,
+        set_id: set_id.into(),
+        verifier: team::verifier(&secret),
+    };
+    assert_eq!(cfg.verifier, "ffdc8263102ee15d44ce17c9c05a78ec");
+    for pair in [[0, 1], [1, 2], [2, 0]] {
+        let parsed: Vec<_> = pair.iter().map(|&i| team::parse_share(&shares[i]).unwrap()).collect();
+        assert_eq!(*team::combine(&parsed, &cfg).unwrap(), secret, "{pair:?}");
+    }
+    let master = team::team_master(&secret, &SALT);
+    let hash: [u8; 32] = Sha256::digest(SOURCE).into();
+    let s = Settings { spec_version: 2, ..settings("aws.example.com", "root", 24, Charset::Strong, 1, true) };
+    assert_eq!(&*crypto::derive_with_master(&master, &hash, &s).unwrap(), r#"p;3Cl1fb>e&X)c?9*o8+lXx8"#);
+}

@@ -21,6 +21,22 @@ pub struct Profile {
     /// A FIDO2 security key whose hmac-secret output is mixed into the master key (format 3+).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hardware_key: Option<HardwareKey>,
+    /// Break-glass team profile: k of n shares replace the master secret.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub team: Option<crate::team::TeamConfig>,
+    /// An ongoing rotation into this profile from an older one (`codepass rotate`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rotation: Option<Rotation>,
+}
+
+/// Progress of moving every registration to a new secret, salt or code.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Rotation {
+    /// The old settings file, still needed for the old passwords.
+    pub from: String,
+    /// (index in this profile, index in the old one) of services not yet changed.
+    pub pending: Vec<(usize, usize)>,
 }
 
 /// Non-secret handle to the credential on the security key. Without the physical key
@@ -213,6 +229,8 @@ impl Profile {
             salt: hex::encode(salt),
             entries: vec![],
             hardware_key: None,
+            team: None,
+            rotation: None,
         })
     }
     pub fn salt_bytes(&self) -> Result<[u8; 16]> {
@@ -327,6 +345,20 @@ impl Profile {
                 return Err("設定の署名の形式が不正です".into());
             }
         }
+        if let Some(team) = &self.team {
+            team.validate()?;
+            if self.hardware_key.is_some() {
+                return Err("チームの設定とセキュリティキーは同時に使えません".into());
+            }
+        }
+        if let Some(r) = &self.rotation {
+            if r.from.is_empty()
+                || r.from.len() > 4096
+                || r.pending.iter().any(|(i, _)| *i >= self.entries.len())
+            {
+                return Err("パスワードの一斉更新の記録が不正です".into());
+            }
+        }
         if let Some(key) = &self.hardware_key {
             let id_ok = hex::decode(&key.credential_id).is_ok_and(|id| (16..=1023).contains(&id.len()));
             if !id_ok || key.rp_id.is_empty() || key.rp_id.len() > 253 || !key.rp_id.is_ascii() {
@@ -383,9 +415,14 @@ pub fn save_new(path: &Path, profile: &Profile) -> Result<()> {
 pub fn update<T>(path: &Path, f: impl FnOnce(&mut Profile) -> Result<T>) -> Result<T> {
     let mut profile = load(path)?;
     let (salt, hardware_key) = (profile.salt.clone(), profile.hardware_key.clone());
+    let team_secret = profile.team.as_ref().map(|t| t.verifier.clone());
     let out = f(&mut profile)?;
-    if profile.salt != salt || profile.hardware_key != hardware_key {
-        return Err("saltとセキュリティキーの設定は変更できません".into());
+    // A team may be re-split (new shares, same secret) but never get another secret.
+    if profile.salt != salt
+        || profile.hardware_key != hardware_key
+        || profile.team.as_ref().map(|t| t.verifier.clone()) != team_secret
+    {
+        return Err("salt・セキュリティキー・チームの秘密は変更できません".into());
     }
     profile.format_version = 3;
     let mut nonce = [0u8; 8];

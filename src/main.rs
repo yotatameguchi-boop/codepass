@@ -5,7 +5,7 @@ use codepass::{
     hardware::{self, SecurityKey},
     phishing,
     profile::{self, Entry, MacStatus, Saved},
-    source, Result,
+    source, team, Result,
 };
 use std::{
     io::{self, IsTerminal, Write},
@@ -137,6 +137,89 @@ enum Command {
         #[arg(long, help = "使われるトークンをすべて表示する")]
         all: bool,
     },
+    #[command(about = "緊急用アカウント向け: 決めた人数がそろったときだけパスワードを作れるチームの設定")]
+    Team {
+        #[command(subcommand)]
+        command: TeamCommand,
+    },
+    #[command(
+        about = "シークレット・コード・共有が漏れたときなどに、全サービスのパスワードを順番に更新する"
+    )]
+    Rotate {
+        #[command(subcommand)]
+        command: RotateCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum TeamCommand {
+    #[command(about = "チームの設定を新しく作り、共有を1人ずつ配る（--config の場所に作る）")]
+    Init {
+        #[arg(long, help = "パスワードを作るのに必要な人数")]
+        threshold: u8,
+        #[arg(long, help = "共有を配る人数（最大16）")]
+        shares: u8,
+        #[arg(long, value_name = "DIR", help = "画面に出さず、1人1ファイルで書き出す")]
+        share_dir: Option<PathBuf>,
+    },
+    #[command(about = "同じ秘密のまま共有を配り直す（共有をなくした人がいるとき。パスワードは変わらない）")]
+    Reshare {
+        #[arg(long)]
+        threshold: u8,
+        #[arg(long)]
+        shares: u8,
+        #[arg(long, value_name = "DIR")]
+        share_dir: Option<PathBuf>,
+    },
+    #[command(about = "チームの設定を表示する")]
+    Status,
+}
+
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum Reason {
+    /// マスターシークレットが漏れた
+    Secret,
+    /// 封印した材料のコードが漏れた
+    Code,
+    /// チームの共有を持つ人が抜けた・共有が漏れた
+    Member,
+    /// 1つのサービスのパスワードが漏れた
+    Site,
+}
+
+#[derive(Subcommand)]
+enum RotateCommand {
+    #[command(about = "状況ごとの更新の手順と、影響するサービスを表示する")]
+    Plan {
+        #[arg(long, value_enum)]
+        reason: Reason,
+    },
+    #[command(about = "新しい設定（salt・シークレットまたは共有・必要ならコード）を作り、一斉更新を始める")]
+    Start {
+        #[arg(
+            long,
+            value_name = "FILE",
+            help = "新しい設定ファイルの場所（既にあるファイルは上書きしない）"
+        )]
+        to: PathBuf,
+        #[arg(long, value_name = "FILE", help = "材料のコードも新しいものにする")]
+        code: Option<PathBuf>,
+        #[arg(long, requires = "shares", help = "新しい設定をチームの設定にする（必要人数）")]
+        threshold: Option<u8>,
+        #[arg(long, requires = "threshold", help = "新しい設定をチームの設定にする（人数）")]
+        shares: Option<u8>,
+        #[arg(long, value_name = "DIR")]
+        share_dir: Option<PathBuf>,
+    },
+    #[command(
+        about = "次のサービスについて、今のパスワードと新しいパスワードを出す（--config は新しい設定）"
+    )]
+    Next {
+        #[command(flatten)]
+        output: Output,
+    },
+    #[command(about = "一斉更新の進み具合を表示する（--config は新しい設定）")]
+    Status,
 }
 
 #[derive(Subcommand)]
@@ -170,6 +253,23 @@ fn run() -> Result<()> {
         Command::Bench => bench()?,
         Command::Doctor => doctor(&path)?,
         Command::Inspect { source, git, all } => inspect(&source, git.as_deref(), all)?,
+        Command::Team { command } => match command {
+            TeamCommand::Init { threshold, shares, share_dir } => {
+                team_init(&path, threshold, shares, share_dir)?
+            }
+            TeamCommand::Reshare { threshold, shares, share_dir } => {
+                team_reshare(&path, threshold, shares, share_dir)?
+            }
+            TeamCommand::Status => team_status(&path)?,
+        },
+        Command::Rotate { command } => match command {
+            RotateCommand::Plan { reason } => rotate_plan(&path, reason)?,
+            RotateCommand::Start { to, code, threshold, shares, share_dir } => {
+                rotate_start(&path, &to, code.as_deref(), threshold.zip(shares), share_dir)?
+            }
+            RotateCommand::Next { output } => rotate_next(&path, &output)?,
+            RotateCommand::Status => rotate_status(&path)?,
+        },
         Command::Init { hardware_key } => {
             let mut p = profile::Profile::new()?;
             if hardware_key {
@@ -565,6 +665,18 @@ fn doctor(path: &std::path::Path) -> Result<()> {
             return Ok(());
         }
     };
+    if let Some(t) = &p.team {
+        checks.push(Check::Ok(format!(
+            "チームの設定です（{} 人のうち {} 人の共有で復元）。秘密そのものは保存されていません",
+            t.shares, t.threshold
+        )));
+    }
+    if let Some(r) = &p.rotation {
+        checks.push(Check::Warn(
+            format!("パスワードの一斉更新が {} 件残っています", r.pending.len()),
+            format!("codepass --config {} rotate next で続けてください", path.display()),
+        ));
+    }
     checks.push(Check::Warn(
         "salt のバックアップ".into(),
         "salt をなくすと全部作り直せません。profile export で別の場所に置いてあるか確かめてください".into(),
@@ -832,6 +944,12 @@ fn unlock_with(p: &profile::Profile, hints: &[&str]) -> Result<Locked<[u8; 32]>>
     if !io::stdin().is_terminal() {
         return Err("マスターシークレットは対話端末から入力してください".into());
     }
+    if p.team.is_some() {
+        let team_secret = recover_team_secret(p)?;
+        let master = Locked::new(*team::team_master(&team_secret, &p.salt_bytes()?));
+        eprintln!("確認コード: {}（いつもと違えば共有の取り違えです）", crypto::check_code(&master)?);
+        return Ok(master);
+    }
     let secret = LockedString::new(
         rpassword::prompt_password("Master secret: ").map_err(|_| "非表示入力に失敗しました")?,
     );
@@ -855,6 +973,427 @@ fn unlock_with(p: &profile::Profile, hints: &[&str]) -> Result<Locked<[u8; 32]>>
     }
     eprintln!("確認コード: {}（いつもと違えば打ち間違いです）", crypto::check_code(&master)?);
     Ok(master)
+}
+
+/// Asks for `threshold` shares (hidden input, one per holder) and recovers the team secret.
+fn recover_team_secret(p: &profile::Profile) -> Result<Locked<[u8; 32]>> {
+    let cfg = p.team.as_ref().ok_or("チームの設定ではありません")?;
+    eprintln!(
+        "チームの設定です。{} 人分の共有を、1人ずつ入力してください（画面には表示されません）",
+        cfg.threshold
+    );
+    let mut got: Vec<team::ParsedShare> = Vec::new();
+    while got.len() < cfg.threshold as usize {
+        let mut tries = 0;
+        loop {
+            let line = LockedString::new(
+                rpassword::prompt_password(format!("共有 {}/{}: ", got.len() + 1, cfg.threshold))
+                    .map_err(|_| "非表示入力に失敗しました")?,
+            );
+            match team::parse_share(&line) {
+                Ok(share) if got.iter().any(|g| g.x == share.x) => {
+                    eprintln!("その共有はもう入力されています")
+                }
+                Ok(share) => {
+                    got.push(share);
+                    break;
+                }
+                Err(e) => eprintln!("{e}"),
+            }
+            tries += 1;
+            if tries >= 3 {
+                return Err("共有を読み取れませんでした".into());
+            }
+        }
+    }
+    Ok(Locked::new(*team::combine(&got, cfg)?))
+}
+
+/// Hands each holder their share: on screen one at a time (cleared in between), or
+/// as one private file per holder.
+fn deliver_shares(shares: &[Zeroizing<String>], k: u8, share_dir: Option<&std::path::Path>) -> Result<()> {
+    let n = shares.len();
+    let note = |i: usize| {
+        format!(
+            "CodePass チームの共有 {i}/{n}（{k} 人分がそろうとパスワードを作れます）\n\
+            この共有は、あなた1人だけが保管してください。紙に書く・パスワード管理ツールに入れるなど、\n\
+            ほかの保管者と同じ場所に置かないでください。\n"
+        )
+    };
+    if let Some(dir) = share_dir {
+        std::fs::create_dir_all(dir).map_err(|_| "共有を書き出すフォルダを作れません")?;
+        for (i, share) in shares.iter().enumerate() {
+            let file = dir.join(format!("codepass-share-{}.txt", i + 1));
+            let mut opts = std::fs::OpenOptions::new();
+            opts.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                opts.mode(0o600);
+            }
+            let mut f = opts.open(&file).map_err(|_| format!("{} を新しく作れません", file.display()))?;
+            writeln!(f, "{}\n{}", note(i + 1), **share).map_err(|_| "共有を書き出せません")?;
+            eprintln!("共有 {}/{n}: {}", i + 1, file.display());
+        }
+        eprintln!("それぞれのファイルを保管者に渡し、このパソコンからは消してください。");
+        return Ok(());
+    }
+    if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
+        return Err(
+            "共有を画面で配るには対話端末が必要です。--share-dir でファイルに書き出してください".into()
+        );
+    }
+    let clear = || {
+        print!("\x1b[2J\x1b[H");
+        let _ = io::stdout().flush();
+    };
+    for (i, share) in shares.iter().enumerate() {
+        clear();
+        eprint!("{} 人目の保管者だけが画面を見られる状態にして、Enter を押してください: ", i + 1);
+        io::stderr().flush().ok();
+        let mut line = String::new();
+        io::stdin().read_line(&mut line).map_err(|_| "入力に失敗しました")?;
+        println!("{}\n{}\n", note(i + 1), **share);
+        eprint!("書き写したら Enter を押してください（画面を消します）: ");
+        io::stderr().flush().ok();
+        line.clear();
+        io::stdin().read_line(&mut line).map_err(|_| "入力に失敗しました")?;
+        clear();
+    }
+    eprintln!("{n} 人に共有を配りました。");
+    Ok(())
+}
+
+fn team_init(path: &std::path::Path, k: u8, n: u8, share_dir: Option<PathBuf>) -> Result<()> {
+    if path.exists() {
+        return Err(format!(
+            "{} は既にあります。チームの設定は新しいファイルに作ってください（--config）",
+            path.display()
+        ));
+    }
+    let mut p = profile::Profile::new()?;
+    let secret = team::new_team_secret()?;
+    let set_id = team::new_set_id()?;
+    let shares = team::split(&secret, k, n, &set_id)?;
+    p.team = Some(team::TeamConfig { threshold: k, shares: n, set_id, verifier: team::verifier(&secret) });
+    p.validate()?;
+    // Shares first: if handing them out fails, no profile is left without shares.
+    deliver_shares(&shares, k, share_dir.as_deref())?;
+    profile::save_new(path, &p)?;
+    eprintln!(
+        "チームの設定を作りました: {}\n\
+        {n} 人のうち {k} 人の共有がそろったときだけ、パスワードを作れます。秘密そのものはどこにも保存していません。\n\
+        次は、緊急用アカウントを登録します: codepass --config {} generate <材料> --site <サービス>",
+        path.display(),
+        path.display()
+    );
+    Ok(())
+}
+
+fn team_reshare(path: &std::path::Path, k: u8, n: u8, share_dir: Option<PathBuf>) -> Result<()> {
+    let p = profile::load(path)?;
+    if p.team.is_none() {
+        return Err("チームの設定ではありません".into());
+    }
+    let secret = recover_team_secret(&p)?;
+    let set_id = team::new_set_id()?;
+    let shares = team::split(&secret, k, n, &set_id)?;
+    let cfg = team::TeamConfig { threshold: k, shares: n, set_id, verifier: team::verifier(&secret) };
+    deliver_shares(&shares, k, share_dir.as_deref())?;
+    profile::update(path, |q| {
+        q.team = Some(cfg);
+        Ok(())
+    })?;
+    eprintln!(
+        "共有を配り直しました（{n} 人のうち {k} 人）。パスワードは変わりません。\n\
+        注意: 古い共有も、{} 人分集めれば同じ秘密を復元できます。共有が「なくなった」ときはこれで十分ですが、\n\
+        「漏れた」「持っていた人が抜けた」ときは codepass rotate plan --reason member の手順で秘密ごと更新してください。",
+        p.team.as_ref().map_or(0, |t| t.threshold)
+    );
+    Ok(())
+}
+
+fn team_status(path: &std::path::Path) -> Result<()> {
+    let p = profile::load(path)?;
+    let t = p.team.as_ref().ok_or("チームの設定ではありません")?;
+    println!("チームの設定: {} 人のうち {} 人で復元（分割 {}）", t.shares, t.threshold, t.set_id);
+    println!("登録: {} 件", p.entries.len());
+    Ok(())
+}
+
+fn entry_name(e: &Entry) -> String {
+    let s = &e.settings;
+    format!(
+        "{}{}（更新{}）",
+        s.site_key(),
+        if s.account.is_empty() { String::new() } else { format!(" / {}", s.account) },
+        s.revision
+    )
+}
+
+fn rotate_plan(path: &std::path::Path, reason: Reason) -> Result<()> {
+    let p = profile::load(path)?;
+    let all: Vec<String> = p.entries.iter().map(entry_name).collect();
+    let sealed = p.entries.iter().filter(|e| e.is_sealed()).count();
+    let cfg = path.display();
+    let (title, steps, affected): (&str, Vec<String>, Vec<String>) = match reason {
+        Reason::Secret => (
+            "マスターシークレットが漏れた",
+            vec![
+                format!("codepass --config {cfg} rotate start --to <新しい設定ファイル>   （新しい salt と新しいシークレット）"),
+                "codepass --config <新しい設定ファイル> rotate next   （1件ずつ、今と新しいパスワードを出して変更）".into(),
+                "全件終わったら、古い設定ファイルとそのバックアップを処分する".into(),
+            ],
+            all.clone(),
+        ),
+        Reason::Code => (
+            "封印した材料のコードが漏れた",
+            vec![
+                format!("シークレットが無事なら、すぐに破られるわけではありません（封印した {sealed} 件の第2の要素が失われた状態）"),
+                format!("codepass --config {cfg} rotate start --to <新しい設定ファイル> --code <新しい非公開のコード>"),
+                "（シークレットは同じものを入力してもかまいません。salt が新しくなるので、パスワードは変わります）".into(),
+                "codepass --config <新しい設定ファイル> rotate next".into(),
+            ],
+            p.entries.iter().filter(|e| e.is_sealed()).map(entry_name).collect(),
+        ),
+        Reason::Member => (
+            "チームの共有を持つ人が抜けた・共有が漏れた",
+            vec![
+                "共有を「なくした」だけなら: codepass team reshare で配り直せば十分です（パスワードは変わりません）".into(),
+                "「漏れた」「持っていた人が抜けた」なら、古い共有を集めれば復元できてしまうので、秘密ごと更新します:".into(),
+                format!("codepass --config {cfg} rotate start --to <新しい設定ファイル> --threshold <k> --shares <n>"),
+                "codepass --config <新しい設定ファイル> rotate next   （古い共有 k 人分と新しい共有 k 人分が必要）".into(),
+            ],
+            all.clone(),
+        ),
+        Reason::Site => (
+            "1つのサービスのパスワードが漏れた",
+            vec![
+                "そのサービスだけ、更新番号を上げて作り直します（ほかのサービスには影響しません）:".into(),
+                "codepass generate <材料> --site <サービス> --revision <今の番号+1>".into(),
+                "codepass get <サービス> --revision <今の番号>   （ログイン用の今のパスワード）".into(),
+            ],
+            Vec::new(),
+        ),
+    };
+    println!("【{title}】\n");
+    for (i, step) in steps.iter().enumerate() {
+        println!("{}. {step}", i + 1);
+    }
+    if !affected.is_empty() {
+        println!("\nパスワードの変更が必要なサービス（{} 件）:", affected.len());
+        for a in affected {
+            println!("  - {a}");
+        }
+    }
+    Ok(())
+}
+
+/// The code hash an entry was registered with, read from its file (and, for a
+/// sealed entry, confirmed with its master key).
+fn registered_code_hash(e: &Entry, master: &[u8; 32]) -> Result<[u8; 32]> {
+    if !e.is_sealed() {
+        if let Some(h) = hex::decode(&e.source_sha256).ok().and_then(|b| <[u8; 32]>::try_from(b).ok()) {
+            return Ok(h);
+        }
+    }
+    let file = e
+        .source_path
+        .as_deref()
+        .ok_or_else(|| format!("{}: 材料のファイルの場所がわかりません", entry_name(e)))?;
+    let loaded = source::load_material(file.as_ref(), e.git_commit.as_deref(), e.material.as_deref())?;
+    if !e.code_matches(&loaded.sha256, master) {
+        return Err(format!("{}: 材料のコードが登録時と違います", entry_name(e)));
+    }
+    Ok(loaded.sha256)
+}
+
+fn rotate_start(
+    path: &std::path::Path,
+    to: &std::path::Path,
+    code: Option<&std::path::Path>,
+    team_size: Option<(u8, u8)>,
+    share_dir: Option<PathBuf>,
+) -> Result<()> {
+    if to.exists() {
+        return Err(format!("{} は既にあります。新しいファイルを指定してください", to.display()));
+    }
+    let old = profile::load(path)?;
+    if old.rotation.is_some() {
+        return Err("この設定への一斉更新がまだ終わっていません（rotate status）".into());
+    }
+    eprintln!("今の設定のシークレット（または共有）を入力してください。");
+    let old_master = unlock_with(&old, &["codepass"])?;
+    let old_mac = crypto::entry_mac_key(&old_master)?;
+    // Every registration must verify and its code must be at hand before anything changes.
+    let mut hashes = Vec::new();
+    for e in &old.entries {
+        if matches!(e.verify(&old_mac), MacStatus::Invalid) {
+            return Err(format!("{} の署名が合いません。何も変更していません", entry_name(e)));
+        }
+        hashes.push(match code {
+            Some(c) => source::load_material(c, None, e.material.as_deref())?.sha256,
+            None => registered_code_hash(e, &old_master)?,
+        });
+    }
+    let mut new = profile::Profile::new()?;
+    let salt = new.salt_bytes()?;
+    let mut shares = None;
+    let new_master = match team_size {
+        Some((k, n)) => {
+            let secret = team::new_team_secret()?;
+            let set_id = team::new_set_id()?;
+            shares = Some((team::split(&secret, k, n, &set_id)?, k));
+            new.team =
+                Some(team::TeamConfig { threshold: k, shares: n, set_id, verifier: team::verifier(&secret) });
+            Locked::new(*team::team_master(&secret, &salt))
+        }
+        None => {
+            eprintln!("新しいマスターシークレットを決めて、2回入力してください。");
+            let a = LockedString::new(
+                rpassword::prompt_password("新しい Master secret: ")
+                    .map_err(|_| "非表示入力に失敗しました")?,
+            );
+            let b = LockedString::new(
+                rpassword::prompt_password("もう一度: ").map_err(|_| "非表示入力に失敗しました")?,
+            );
+            if *a != *b {
+                return Err("2回の入力が一致しません（何も変更していません）".into());
+            }
+            if let Some(w) = crypto::secret_warning(&a, &["codepass"]) {
+                eprintln!("{w}");
+            }
+            Locked::new(*crypto::master_key(&a, &salt)?)
+        }
+    };
+    if old.hardware_key.is_some() {
+        eprintln!("注意: 新しい設定ではセキュリティキーを使いません（必要なら init --hardware-key から作り直してください）");
+    }
+    let new_mac = crypto::entry_mac_key(&new_master)?;
+    let mut pending = Vec::new();
+    for (i, (e, hash)) in old.entries.iter().zip(&hashes).enumerate() {
+        let mut ne = Entry {
+            source_sha256: hex::encode(hash),
+            settings: e.settings.clone(),
+            source_path: match code {
+                Some(c) => std::path::absolute(c).ok().and_then(|p| p.to_str().map(str::to_string)),
+                None => e.source_path.clone(),
+            },
+            git_commit: if code.is_some() { None } else { e.git_commit.clone() },
+            mac: None,
+            material: e.material.clone(),
+            source_check: None,
+        };
+        if e.is_sealed() {
+            ne.seal(&new_master)?;
+        }
+        ne.sign(&new_mac);
+        new.entries.push(ne);
+        pending.push((i, i));
+    }
+    let from = std::path::absolute(path).map_err(|_| "設定ファイルの場所を特定できません")?;
+    new.rotation = Some(profile::Rotation {
+        from: from.to_str().ok_or("設定ファイルのパスはUTF-8である必要があります")?.to_string(),
+        pending,
+    });
+    new.validate()?;
+    if let Some((s, k)) = &shares {
+        deliver_shares(s, *k, share_dir.as_deref())?;
+    }
+    profile::save_new(to, &new)?;
+    eprintln!(
+        "新しい設定を作りました: {}（{} 件）\n\
+        各サービスで、パスワードを新しいものに変えていきます:\n  codepass --config {} rotate next\n\
+        すべて終わるまで、古い設定ファイル（{}）は消さないでください。",
+        to.display(),
+        new.entries.len(),
+        to.display(),
+        path.display()
+    );
+    Ok(())
+}
+
+fn rotate_next(path: &std::path::Path, output: &Output) -> Result<()> {
+    let new = profile::load(path)?;
+    let r = new.rotation.clone().ok_or("進行中の一斉更新はありません")?;
+    let Some(&(j, i)) = r.pending.first() else {
+        return Err("残っているサービスはありません".into());
+    };
+    let total = new.entries.len();
+    let old = profile::load(r.from.as_ref())?;
+    let ne = new.entries.get(j).ok_or("一斉更新の記録が不正です")?;
+    let oe = old.entries.get(i).ok_or("古い設定に対応する登録がありません")?;
+    eprintln!("【残り {} 件】{}\n", r.pending.len(), entry_name(ne));
+    eprintln!("まず、今のパスワードを作ります。古い設定のシークレット（または共有）を入力してください。");
+    let old_master = unlock_with(&old, &["codepass"])?;
+    check_entry(oe, &old_master)?;
+    let old_hash = registered_code_hash(oe, &old_master)?;
+    let old_pw = crypto::derive_with_master(&old_master, &old_hash, &oe.settings)?;
+    drop(old_master);
+    eprintln!(
+        "\n次に、新しいパスワードを作ります。新しい設定のシークレット（または共有）を入力してください。"
+    );
+    let new_master = unlock_with(&new, &["codepass"])?;
+    check_entry(ne, &new_master)?;
+    let new_hash = registered_code_hash(ne, &new_master)?;
+    let new_pw = crypto::derive_with_master(&new_master, &new_hash, &ne.settings)?;
+    eprintln!("\n1. 今のパスワード（サービスの「現在のパスワード」欄に）");
+    present(&old_pw, oe.settings.length, output)?;
+    eprintln!("\n2. 新しいパスワード（「新しいパスワード」欄に）");
+    present(&new_pw, ne.settings.length, output)?;
+    eprint!(
+        "\n{} で変更が終わったら done、後回しにするなら skip と入力してください: ",
+        ne.settings.site_key()
+    );
+    io::stderr().flush().ok();
+    let mut answer = String::new();
+    io::stdin().read_line(&mut answer).map_err(|_| "入力に失敗しました")?;
+    let done = match answer.trim() {
+        "done" => true,
+        "skip" => false,
+        _ => {
+            eprintln!("記録を変えずに終わります");
+            return Ok(());
+        }
+    };
+    let left = profile::update(path, |q| {
+        let rot = q.rotation.as_mut().ok_or("進行中の一斉更新はありません")?;
+        rot.pending.retain(|p| *p != (j, i));
+        if !done {
+            rot.pending.push((j, i));
+        }
+        let left = rot.pending.len();
+        if left == 0 {
+            q.rotation = None;
+        }
+        Ok(left)
+    })?;
+    if left == 0 {
+        eprintln!(
+            "全 {total} 件の更新が終わりました。古い設定ファイル（{}）とそのバックアップを処分し、\n\
+            新しい設定を profile export でバックアップしてください。",
+            r.from
+        );
+    } else {
+        eprintln!("残り {left} 件です。続けるには: codepass --config {} rotate next", path.display());
+    }
+    Ok(())
+}
+
+fn rotate_status(path: &std::path::Path) -> Result<()> {
+    let p = profile::load(path)?;
+    let Some(r) = &p.rotation else {
+        println!("進行中の一斉更新はありません");
+        return Ok(());
+    };
+    let done = p.entries.len() - r.pending.len();
+    println!("一斉更新: {done}/{} 件 完了（古い設定: {}）", p.entries.len(), r.from);
+    for (j, _) in &r.pending {
+        if let Some(e) = p.entries.get(*j) {
+            println!("  未完了: {}", entry_name(e));
+        }
+    }
+    Ok(())
 }
 
 /// A registered entry must carry a valid signature from this master key.
