@@ -88,12 +88,22 @@ def with_hardware(master, hw_output):
     return hkdf(b"CodePass/hw-factor/v1", master + hw_output, b"CodePass/master/v1")
 
 
-def entry_mac(master, source_sha256_hex, site, account, length, cs, rev, req, spec, symbols, path, commit):
+def code_check(master, code_hash):
+    key = hkdf(b"CodePass/HKDF/v1", master, b"CodePass/code-check/v1")
+    return hmac.new(key, code_hash, hashlib.sha256).hexdigest()
+
+
+def entry_mac(master, source_sha256_hex, site, account, length, cs, rev, req, spec, symbols, path, commit,
+              material=None, check=None):
     def lp(b): return struct.pack(">I", len(b)) + b
     def opt(v): return b"\0" if v is None else b"\1" + lp(v.encode())
     data = (b"CodePass/entry/v1\0" + lp(source_sha256_hex.lower().encode()) + lp(site.encode()) + lp(account.encode())
             + struct.pack(">I", length) + bytes([1 if cs == "strong" else 2]) + struct.pack(">I", rev)
             + bytes([int(req)]) + struct.pack(">I", spec) + opt(symbols) + opt(path) + opt(commit))
+    if material is not None:
+        data += opt(material)
+    if check is not None:
+        data += b"\x02" + lp(check.encode())
     key = hkdf(b"CodePass/HKDF/v1", master, b"CodePass/entry-mac/v1")
     return hmac.new(key, data, hashlib.sha256).hexdigest()
 
@@ -124,3 +134,8 @@ PY_SRC = "def f(x, y):\n    if x:\n        return (1,)\n    return y  # done\n"
 for name, code in [("main.rs", RUST_SRC), ("app.py", PY_SRC)]:
     sh = syntax_hash(code.encode(), name)
     print("SYNTAX", name, sh.hex(), gen(m, sh, "github.com", "", 24, "strong", 1, True, ver=2))
+
+check = code_check(m, h)
+print("CODE_CHECK", check)
+print("SEALED_MAC", entry_mac(m, "", "github.com", "", 24, "strong", 1, True, 2, None,
+                              "/home/me/keys/main.rs", None, check=check))

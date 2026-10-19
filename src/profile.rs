@@ -35,6 +35,8 @@ pub struct HardwareKey {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Entry {
+    /// The code's hash (bytes or syntax material). Empty when the entry is sealed.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub source_sha256: String,
     pub settings: Settings,
     /// Where the code was read from (format 2+). Lets `get` find it again.
@@ -51,6 +53,10 @@ pub struct Entry {
     /// token stream (crate::syntax). `source_sha256` holds whichever hash it is.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub material: Option<String>,
+    /// Sealed entries (format 3+): instead of the code's hash, a check value only the
+    /// master key can verify (crypto::code_check). Then the code is a second factor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_check: Option<String>,
 }
 
 pub enum MacStatus {
@@ -93,9 +99,14 @@ impl Entry {
         put_opt(&mut out, &s.symbols);
         put_opt(&mut out, &self.source_path);
         put_opt(&mut out, &self.git_commit);
-        // Appended only when set, so entries signed before it existed still verify.
+        // Appended only when set, so entries signed before they existed still verify.
+        // Distinct tags (0x01 material, 0x02 check) keep the two apart.
         if self.material.is_some() {
             put_opt(&mut out, &self.material);
+        }
+        if let Some(check) = &self.source_check {
+            out.push(2);
+            put(&mut out, check.as_bytes());
         }
         out
     }
@@ -129,10 +140,54 @@ impl Entry {
     pub fn same_key(&self, other: &Settings) -> bool {
         self.same_service(other) && self.settings.revision == other.revision
     }
-    pub fn same_password(&self, other: &Entry) -> bool {
+    pub fn is_sealed(&self) -> bool {
+        self.source_check.is_some()
+    }
+
+    /// Compares the code of two entries. With the master key, sealed and unsealed
+    /// entries compare too; without it, only like with like (None = cannot tell).
+    fn material_key(&self, master: Option<&[u8; 32]>) -> Option<String> {
+        match (&self.source_check, master) {
+            (Some(check), _) => Some(format!("check:{check}")),
+            (None, Some(m)) => {
+                let hash: [u8; 32] = hex::decode(&self.source_sha256).ok()?.try_into().ok()?;
+                crate::crypto::code_check(m, &hash).ok().map(|c| format!("check:{c}"))
+            }
+            (None, None) => Some(format!("hash:{}", self.source_sha256.to_ascii_lowercase())),
+        }
+    }
+
+    /// Whether `code_hash` is this entry's code. Sealed entries need the master key.
+    pub fn code_matches(&self, code_hash: &[u8; 32], master: &[u8; 32]) -> bool {
+        match &self.source_check {
+            None => hex::encode(code_hash).eq_ignore_ascii_case(&self.source_sha256),
+            Some(check) => crate::crypto::code_check(master, code_hash).is_ok_and(|c| {
+                // Constant-time comparison of the two check values.
+                c.len() == check.len()
+                    && c.bytes().zip(check.bytes()).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+            }),
+        }
+    }
+
+    /// Replaces the stored code hash with a check value (the password is unchanged).
+    pub fn seal(&mut self, master: &[u8; 32]) -> Result<()> {
+        if self.is_sealed() {
+            return Ok(());
+        }
+        let hash: [u8; 32] = hex::decode(&self.source_sha256)
+            .ok()
+            .and_then(|b| b.try_into().ok())
+            .ok_or("コードハッシュが不正です")?;
+        self.source_check = Some(crate::crypto::code_check(master, &hash)?);
+        self.source_sha256.clear();
+        Ok(())
+    }
+
+    pub fn same_password(&self, other: &Entry, master: Option<&[u8; 32]>) -> bool {
         let (a, b) = (&self.settings, &other.settings);
         self.same_key(b)
-            && self.source_sha256.eq_ignore_ascii_case(&other.source_sha256)
+            && self.material_key(master).is_some()
+            && self.material_key(master) == other.material_key(master)
             && a.length == b.length
             && a.charset == b.charset
             && a.require_classes == b.require_classes
@@ -166,13 +221,13 @@ impl Profile {
     }
     /// Adds or updates an entry. A different password under the same key is never
     /// overwritten unless `replace` is set, because the old one would be lost.
-    pub fn upsert(&mut self, entry: Entry, replace: bool) -> Saved {
+    pub fn upsert(&mut self, entry: Entry, replace: bool, master: Option<&[u8; 32]>) -> Saved {
         match self.entries.iter_mut().find(|e| e.same_key(&entry.settings)) {
             None => {
                 self.entries.push(entry);
                 Saved::Added
             }
-            Some(e) if e.same_password(&entry) => {
+            Some(e) if e.same_password(&entry, master) => {
                 if e.source_path.is_none() || entry.git_commit.is_some() || e.mac.is_none() {
                     *e = entry;
                 }
@@ -240,9 +295,21 @@ impl Profile {
         }
         for entry in &self.entries {
             entry.settings.validate()?;
-            if hex::decode(&entry.source_sha256).map_err(|_| "コードハッシュが不正です")?.len() != 32
-            {
-                return Err("コードハッシュは32バイトである必要があります".into());
+            match &entry.source_check {
+                None => {
+                    if hex::decode(&entry.source_sha256).map_err(|_| "コードハッシュが不正です")?.len() != 32
+                    {
+                        return Err("コードハッシュは32バイトである必要があります".into());
+                    }
+                }
+                Some(check) => {
+                    if !entry.source_sha256.is_empty()
+                        || check.len() != 64
+                        || !check.bytes().all(|b| b.is_ascii_hexdigit())
+                    {
+                        return Err("封印した登録の形式が不正です".into());
+                    }
+                }
             }
             if entry.source_path.as_ref().is_some_and(|p| p.len() > 4096 || p.chars().any(char::is_control)) {
                 return Err("ソースファイルのパスが不正です".into());
@@ -362,6 +429,7 @@ mod tests {
             git_commit: None,
             mac: None,
             material: None,
+            source_check: None,
             settings: Settings {
                 site: site.into(),
                 account: "".into(),
@@ -421,6 +489,37 @@ mod tests {
     }
 
     #[test]
+    fn sealing_hides_the_hash_but_keeps_the_entry_usable() {
+        let master = [7u8; 32];
+        let code = [1u8; 32];
+        let mut e = entry("github.com", 1, 1);
+        let plain = e.clone();
+        e.seal(&master).unwrap();
+        e.sign(&master);
+        assert!(e.is_sealed() && e.source_sha256.is_empty());
+        let json = serde_json::to_string(&e).unwrap();
+        assert!(!json.contains(&hex::encode(code)), "the code hash is not in the file");
+        assert!(e.code_matches(&code, &master));
+        assert!(!e.code_matches(&[2u8; 32], &master), "other code");
+        assert!(!e.code_matches(&code, &[8u8; 32]), "other master key");
+        assert!(matches!(e.verify(&master), MacStatus::Valid));
+        // Without the master key a sealed and an unsealed entry cannot be compared;
+        // with it, they are recognised as the same password.
+        assert!(!e.same_password(&plain, None));
+        assert!(e.same_password(&plain, Some(&master)));
+        // Tampering with the check value is caught by the signature.
+        let mut t = e.clone();
+        t.source_check = Some("0".repeat(64));
+        assert!(matches!(t.verify(&master), MacStatus::Invalid));
+        // A sealed entry must not also carry a hash.
+        let mut p = Profile::new().unwrap();
+        let mut both = e.clone();
+        both.source_sha256 = hex::encode(code);
+        p.entries = vec![both];
+        assert!(p.validate().is_err());
+    }
+
+    #[test]
     fn update_refuses_to_change_the_hardware_key() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("profile.json");
@@ -440,19 +539,19 @@ mod tests {
         let p = Profile::new().unwrap();
         save_new(&path, &p).unwrap();
         assert!(matches!(
-            update(&path, |p| Ok(p.upsert(entry("github.com", 1, 1), false))).unwrap(),
+            update(&path, |p| Ok(p.upsert(entry("github.com", 1, 1), false, None))).unwrap(),
             Saved::Added
         ));
         assert!(matches!(
-            update(&path, |p| Ok(p.upsert(entry("github.com", 1, 1), false))).unwrap(),
+            update(&path, |p| Ok(p.upsert(entry("github.com", 1, 1), false, None))).unwrap(),
             Saved::Unchanged
         ));
         assert!(matches!(
-            update(&path, |p| Ok(p.upsert(entry("github.com", 1, 2), false))).unwrap(),
+            update(&path, |p| Ok(p.upsert(entry("github.com", 1, 2), false, None))).unwrap(),
             Saved::Conflict
         ));
         assert!(matches!(
-            update(&path, |p| Ok(p.upsert(entry("github.com", 2, 2), false))).unwrap(),
+            update(&path, |p| Ok(p.upsert(entry("github.com", 2, 2), false, None))).unwrap(),
             Saved::Added
         ));
         assert!(update(&path, |p| {

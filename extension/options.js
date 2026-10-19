@@ -39,7 +39,7 @@ async function render() {
   for (const e of info.entries) {
     const tr = document.createElement("tr");
     const ok = Boolean(sources[e.source_sha256]);
-    const kind = e.material ? "（構文）" : "";
+    const kind = (e.material ? "（構文）" : "") + (e.sealed ? "（封印）" : "");
     const cells = [e.site, e.account || "—", String(e.revision), (ok ? "✓ 読み込み済み" : "未読み込み") + kind];
     for (const text of cells) {
       const td = document.createElement("td");
@@ -94,6 +94,16 @@ async function main() {
       const byteHash = await sha256Hex(bytes);
       let matched = false;
       for (const e of entries) {
+        if (e.sealed) {
+          // A sealed registration keeps no hash: match by file name now; the code
+          // itself is checked when the secret is entered in the popup.
+          const registered = (e.source_path ?? "").split(/[\\/]/).pop();
+          if (registered && registered === file.name) {
+            sources[e.source_sha256] = toBase64(bytes);
+            matched = true;
+          }
+          continue;
+        }
         // Syntax-material entries compare the token stream, so a reformatted or
         // commented copy of the registered code still matches.
         let h = byteHash;

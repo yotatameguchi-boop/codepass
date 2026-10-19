@@ -120,6 +120,7 @@ struct EntrySummary {
     git_commit: Option<String>,
     signed: bool,
     material: Option<String>,
+    sealed: bool,
 }
 
 fn summarize(index: usize, e: &codepass::profile::Entry) -> EntrySummary {
@@ -130,7 +131,13 @@ fn summarize(index: usize, e: &codepass::profile::Entry) -> EntrySummary {
         revision: e.settings.revision,
         length: e.settings.length,
         spec_version: e.settings.spec_version,
-        source_sha256: e.source_sha256.to_ascii_lowercase(),
+        // The key the extension stores the code under: the hash, or for a sealed
+        // registration its check value (the hash is not in the file).
+        source_sha256: match &e.source_check {
+            Some(check) => format!("sealed:{check}"),
+            None => e.source_sha256.to_ascii_lowercase(),
+        },
+        sealed: e.is_sealed(),
         source_path: e.source_path.clone(),
         git_commit: e.git_commit.clone(),
         signed: e.mac.is_some(),
@@ -254,7 +261,7 @@ fn derive_entry_impl(
     }
     let e = p.entries.get(index).ok_or_else(|| err("指定された登録がありません"))?;
     let hash = entry_material_hash(e, source)?;
-    if !hex::encode(hash).eq_ignore_ascii_case(&e.source_sha256) {
+    if !e.is_sealed() && !e.code_matches(&hash, &[0; 32]) {
         return Err(err("材料のファイルが登録時と違います。設定画面で正しいファイルを読み込んでください"));
     }
     let salt = p.salt_bytes()?;
@@ -270,6 +277,10 @@ fn derive_entry_impl(
             ))
         }
     };
+    // A sealed registration can only be checked now that the master key is known.
+    if !e.code_matches(&hash, &master) {
+        return Err(err("材料のコードが登録時と違います。設定画面で正しいファイルを読み込んでください"));
+    }
     let password = crypto::derive_with_master(&master, &hash, &e.settings)?;
     #[derive(Serialize)]
     struct Derived {
@@ -450,6 +461,7 @@ mod tests {
             git_commit: None,
             mac: None,
             material: None,
+            source_check: None,
         };
         e.sign(&crypto::entry_mac_key(&master).unwrap());
         p.entries.push(e);
@@ -490,6 +502,17 @@ mod tests {
         .unwrap();
         assert_eq!(a["password"], b["password"]);
         assert!(super::derive_entry_impl(&json2, 0, b"fn main() { let x = 2; }", secret).is_err());
+
+        // A sealed registration: the right code with the right secret works, other code fails.
+        let mut p3 = p.clone();
+        p3.entries[0].seal(&master).unwrap();
+        p3.entries[0].sign(&crypto::entry_mac_key(&master).unwrap());
+        let json3 = serde_json::to_string(&p3).unwrap();
+        assert!(!json3.contains(&hex::encode(hash)), "no code hash in a sealed profile");
+        let sealed: serde_json::Value =
+            serde_json::from_str(&super::derive_entry_impl(&json3, 0, source, secret).unwrap()).unwrap();
+        assert_eq!(sealed["password"], expected.as_str(), "sealing does not change the password");
+        assert!(super::derive_entry_impl(&json3, 0, b"other code", secret).is_err());
 
         // Browsers hand over the Punycode form; it must still be caught.
         for host in ["g\u{456}thub.com", "xn--gthub-n2e.com"] {

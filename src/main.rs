@@ -95,6 +95,11 @@ enum Command {
         export_settings: Option<PathBuf>,
         #[arg(long, help = "登録済みのサービスと見分けにくい名前でも登録する（フィッシング対策を解除）")]
         allow_lookalike: bool,
+        #[arg(
+            long,
+            help = "コードのハッシュを設定に残さない（コードを第2の要素にする。非公開のコード向け）"
+        )]
+        seal_code: bool,
         #[command(flatten)]
         output: Output,
     },
@@ -149,6 +154,10 @@ enum ProfileCommand {
     Remove {
         entry: usize,
     },
+    #[command(
+        about = "登録済みのコードのハッシュを設定から消し、コードを第2の要素にする（パスワードは変わらない）"
+    )]
+    SealCode,
 }
 
 fn run() -> Result<()> {
@@ -194,11 +203,15 @@ fn run() -> Result<()> {
             ProfileCommand::List => {
                 for (i, e) in profile::load(&path)?.entries.iter().enumerate() {
                     let s = &e.settings;
-                    let from = match (&e.source_path, &e.git_commit) {
+                    let mut from = match (&e.source_path, &e.git_commit) {
                         (Some(p), Some(c)) => format!("{p} @ {}", &c[..12]),
                         (Some(p), None) => p.clone(),
+                        _ if e.is_sealed() => "（場所の記録なし）".to_string(),
                         _ => format!("コード{}", &e.source_sha256[..16]),
                     };
+                    if e.is_sealed() {
+                        from.push_str(" [封印]");
+                    }
                     let chars = match (&s.charset, &s.symbols) {
                         (Charset::Strong, Some(sym)) => format!("記号{sym}"),
                         (c, _) => format!("{c:?}"),
@@ -216,6 +229,7 @@ fn run() -> Result<()> {
                     );
                 }
             }
+            ProfileCommand::SealCode => seal_code(&path)?,
             ProfileCommand::Remove { entry } => {
                 let removed = profile::update(&path, |p| {
                     let i = entry
@@ -253,7 +267,8 @@ fn run() -> Result<()> {
                 .ok_or("この設定にはファイルの場所が記録されていません。regenerate を使ってください")?;
             let loaded =
                 source::load_material(file.as_ref(), e.git_commit.as_deref(), e.material.as_deref())?;
-            if !hex::encode(loaded.sha256).eq_ignore_ascii_case(&e.source_sha256) {
+            // Unsealed entries can be checked before asking for the secret.
+            if !e.is_sealed() && !e.code_matches(&loaded.sha256, &[0; 32]) {
                 return Err(if e.material.is_some() {
                     format!(
                         "{file} のコードの中身（構文）が登録時と変わっています。整形やコメントの違いは関係ありませんが、\
@@ -268,6 +283,7 @@ fn run() -> Result<()> {
             }
             let master = unlock(&p, &e.settings)?;
             check_entry(e, &master)?;
+            check_code(e, &loaded.sha256, &master)?;
             let password = crypto::derive_with_master(&master, &loaded.sha256, &e.settings)?;
             describe(&loaded.sha256, &e.settings);
             present(&password, e.settings.length, &output)?;
@@ -279,7 +295,7 @@ fn run() -> Result<()> {
                 .and_then(|i| p.entries.get(i))
                 .ok_or("指定された番号の設定エントリがありません")?;
             let loaded = source::load_material(&source, e.git_commit.as_deref(), e.material.as_deref())?;
-            if !hex::encode(loaded.sha256).eq_ignore_ascii_case(&e.source_sha256) {
+            if !e.is_sealed() && !e.code_matches(&loaded.sha256, &[0; 32]) {
                 return Err(
                     "ソースコードの内容が保存時と一致しません（1バイトでも違うと別のパスワードになります）"
                         .into(),
@@ -287,6 +303,7 @@ fn run() -> Result<()> {
             }
             let master = unlock(&p, &e.settings)?;
             check_entry(e, &master)?;
+            check_code(e, &loaded.sha256, &master)?;
             let password = crypto::derive_with_master(&master, &loaded.sha256, &e.settings)?;
             describe(&loaded.sha256, &e.settings);
             present(&password, e.settings.length, &output)?;
@@ -307,6 +324,7 @@ fn run() -> Result<()> {
             replace,
             export_settings,
             allow_lookalike,
+            seal_code,
             output,
         } => {
             let symbols = symbols.as_deref().map(crypto::canonical_symbols).transpose()?;
@@ -355,50 +373,43 @@ fn run() -> Result<()> {
                 git_commit: loaded.git_commit.clone(),
                 mac: None,
                 material: material.id().map(str::to_string),
+                source_check: None,
             };
             // Check before asking for the secret: a mismatch usually means the file changed.
+            // (A sealed registration can only be compared once the secret is known.)
             if !no_save && !replace {
-                if let Some(old) =
-                    p.entries.iter().find(|e| e.same_key(&settings) && !e.same_password(&entry))
+                if let Some(old) = p
+                    .entries
+                    .iter()
+                    .find(|e| e.same_key(&settings) && !e.is_sealed() && !e.same_password(&entry, None))
                 {
-                    let why = if old.source_sha256.eq_ignore_ascii_case(&entry.source_sha256) {
-                        "文字数や文字種の設定"
-                    } else {
-                        "コードの内容"
-                    };
-                    return Err(format!(
-                        "{}（更新番号{}）は登録済みですが、{}が違うので別のパスワードになります。\n  \
-                        登録済みのものを出す: codepass get {}{}\n  \
-                        パスワードを更新する: --revision {} を付ける\n  \
-                        登録を置き換える: --replace / 登録せずに出す: --no-save",
-                        settings.site_key(),
-                        revision,
-                        why,
-                        settings.site_key(),
-                        if settings.account.is_empty() {
-                            String::new()
-                        } else {
-                            format!(" --account {}", settings.account)
-                        },
-                        p.entries
-                            .iter()
-                            .filter(|e| e.same_service(&settings))
-                            .map(|e| e.settings.revision)
-                            .max()
-                            .unwrap_or(revision)
-                            .saturating_add(1)
-                    ));
+                    return Err(conflict_error(&p, &settings, &entry, old));
                 }
             }
             let master = unlock(&p, &settings)?;
+            if !no_save && !replace {
+                if let Some(old) = p.entries.iter().find(|e| {
+                    e.same_key(&settings) && e.is_sealed() && !e.same_password(&entry, Some(&master))
+                }) {
+                    return Err(conflict_error(&p, &settings, &entry, old));
+                }
+            }
             let password = crypto::derive_with_master(&master, &loaded.sha256, &settings)?;
             describe(&loaded.sha256, &settings);
+            if seal_code {
+                entry.seal(&master)?;
+            }
             entry.sign(&*crypto::entry_mac_key(&master)?);
             if !no_save {
-                match profile::update(&path, |p| Ok(p.upsert(entry.clone(), replace)))? {
+                match profile::update(&path, |p| Ok(p.upsert(entry.clone(), replace, Some(&master))))? {
                     Saved::Added => eprintln!(
-                        "設定を登録しました。次からは codepass get {} で呼び出せます",
-                        settings.site_key()
+                        "設定を登録しました。次からは codepass get {} で呼び出せます{}",
+                        settings.site_key(),
+                        if seal_code {
+                            "（コードのハッシュは設定に残していません）"
+                        } else {
+                            ""
+                        }
                     ),
                     Saved::Replaced => eprintln!("登録済みの設定を置き換えました"),
                     Saved::Unchanged => {}
@@ -414,6 +425,82 @@ fn run() -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn conflict_error(p: &profile::Profile, settings: &Settings, new: &Entry, old: &Entry) -> String {
+    let same_code = !old.is_sealed() && old.source_sha256.eq_ignore_ascii_case(&new.source_sha256);
+    let why = if same_code { "文字数や文字種の設定" } else { "コードの内容か設定" };
+    let revision = settings.revision;
+    format!(
+        "{}（更新番号{}）は登録済みですが、{}が違うので別のパスワードになります。\n  \
+        登録済みのものを出す: codepass get {}{}\n  \
+        パスワードを更新する: --revision {} を付ける\n  \
+        登録を置き換える: --replace / 登録せずに出す: --no-save",
+        settings.site_key(),
+        revision,
+        why,
+        settings.site_key(),
+        if settings.account.is_empty() { String::new() } else { format!(" --account {}", settings.account) },
+        p.entries
+            .iter()
+            .filter(|e| e.same_service(settings))
+            .map(|e| e.settings.revision)
+            .max()
+            .unwrap_or(revision)
+            .saturating_add(1)
+    )
+}
+
+/// Seals every registration: the stored code hashes are replaced by check values only
+/// the master key can verify. Passwords do not change.
+fn seal_code(path: &std::path::Path) -> Result<()> {
+    let p = profile::load(path)?;
+    let open: Vec<usize> = (0..p.entries.len()).filter(|&i| !p.entries[i].is_sealed()).collect();
+    if open.is_empty() {
+        eprintln!("封印していない登録はありません");
+        return Ok(());
+    }
+    let master = unlock_with(&p, &["codepass"])?;
+    let mac_key = crypto::entry_mac_key(&master)?;
+    let mut entries = p.entries.clone();
+    for &i in &open {
+        let e = &mut entries[i];
+        if matches!(e.verify(&mac_key), MacStatus::Invalid) {
+            return Err(format!(
+                "#{} {} の署名が合いません。シークレットの打ち間違いか、設定が書き換えられています（何も変更していません）",
+                i + 1,
+                e.settings.site_key()
+            ));
+        }
+        e.seal(&master)?;
+        e.sign(&mac_key);
+    }
+    profile::update(path, |q| {
+        if q.entries.len() != entries.len() {
+            return Err("設定ファイルが別の処理で変更されました。もう一度実行してください".to_string());
+        }
+        q.entries = entries;
+        Ok(())
+    })?;
+    eprintln!(
+        "{} 件の登録を封印しました。設定ファイルとシークレットを盗まれても、コードがなければパスワードは作れません。\n\
+        注意: 以前に書き出したバックアップにはコードのハッシュが残っています。profile export で作り直し、古いものは消してください。\n\
+        注意: コードをなくすと、封印した登録のパスワードは作り直せません。コードのバックアップ（Git など）を確かめてください。",
+        open.len()
+    );
+    Ok(())
+}
+
+/// For a sealed registration, the code can only be checked once the secret is known.
+fn check_code(e: &Entry, code_hash: &[u8; 32], master: &[u8; 32]) -> Result<()> {
+    if e.code_matches(code_hash, master) {
+        return Ok(());
+    }
+    Err(if e.material.is_some() {
+        "材料のコードの中身（構文）が登録時と違います。名前・処理・文字列の変更を元に戻してください".into()
+    } else {
+        "材料のコードが登録時と違います（1バイトでも違うと別のパスワードになります）".into()
+    })
 }
 
 /// Attacker model for the cost table (docs/THREAT_MODEL.md explains each number).
@@ -511,7 +598,34 @@ fn doctor(path: &std::path::Path) -> Result<()> {
             }
         };
         match source {
-            Ok(loaded) if hex::encode(loaded.sha256).eq_ignore_ascii_case(&e.source_sha256) => {
+            // A sealed registration hides the hash: only "the code is readable" can be
+            // checked without the secret; `get` checks the rest.
+            Ok(_) if e.is_sealed() => {
+                checks.push(Check::Ok(format!(
+                    "{name}: 封印済み（コードが第2の要素）。材料のファイルは読めます"
+                )));
+                // The code is now part of the secret: a short file is guessable by
+                // someone who has both the settings file and the master secret.
+                if let Some(file) = &e.source_path {
+                    if let Ok((bytes, _)) = source::read_bytes(file.as_ref(), e.git_commit.as_deref()) {
+                        if bytes.len() < 512 {
+                            checks.push(Check::Warn(
+                                format!("{name}: 材料のコードが {} バイトと短めです", bytes.len()),
+                                "封印した材料は第2の秘密です。推測されにくいよう、ある程度の長さの自分だけのコードを使ってください".into(),
+                            ));
+                        }
+                    }
+                }
+                if let Some(file) = &e.source_path {
+                    if source::has_git_remote(file.as_ref()) {
+                        checks.push(Check::Warn(
+                            format!("{name}: 材料のコードが Git のリモートとつながっています"),
+                            "公開リポジトリなら、封印してもコードは第2の要素になりません。非公開のコードを使ってください".into(),
+                        ));
+                    }
+                }
+            }
+            Ok(loaded) if e.code_matches(&loaded.sha256, &[0; 32]) => {
                 if e.git_commit.is_some() {
                     checks.push(Check::Ok(format!("{name}: 材料はコミットで固定されています")));
                 } else if e.material.is_some() {
@@ -553,6 +667,16 @@ fn doctor(path: &std::path::Path) -> Result<()> {
                 "20文字以上を推奨します".into(),
             ));
         }
+    }
+
+    let open = p.entries.iter().filter(|e| !e.is_sealed()).count();
+    if open > 0 {
+        checks.push(Check::Warn(
+            format!("{open} 件の登録はコードのハッシュを設定に残しています"),
+            "設定ファイルとシークレットを盗まれると、コードがなくてもパスワードを作られます。\
+            非公開のコードなら codepass profile seal-code で封印すると、コードが第2の要素になります"
+                .into(),
+        ));
     }
 
     let names = registered_sites(&p);
@@ -696,18 +820,24 @@ fn open_security_key() -> Result<Box<dyn SecurityKey>> {
 /// kept in locked memory and zeroed when dropped.
 fn unlock(p: &profile::Profile, settings: &Settings) -> Result<Locked<[u8; 32]>> {
     settings.validate()?;
-    if !io::stdin().is_terminal() {
-        return Err("マスターシークレットは対話端末から入力してください".into());
-    }
     if settings.length < 15 {
         eprintln!("警告: 15文字未満です。20文字以上を推奨します。");
+    }
+    unlock_with(p, &["codepass", &settings.site, &settings.account])
+}
+
+/// The secret (and security key) → master key. `hints` are words the strength check
+/// should treat as guessable.
+fn unlock_with(p: &profile::Profile, hints: &[&str]) -> Result<Locked<[u8; 32]>> {
+    if !io::stdin().is_terminal() {
+        return Err("マスターシークレットは対話端末から入力してください".into());
     }
     let secret = LockedString::new(
         rpassword::prompt_password("Master secret: ").map_err(|_| "非表示入力に失敗しました")?,
     );
     let salt = p.salt_bytes()?;
     let mut master = Locked::new(*crypto::master_key(&secret, &salt)?);
-    if let Some(warning) = crypto::secret_warning(&secret, &["codepass", &settings.site, &settings.account]) {
+    if let Some(warning) = crypto::secret_warning(&secret, hints) {
         eprintln!("{warning}");
     }
     drop(secret);

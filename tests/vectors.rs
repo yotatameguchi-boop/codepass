@@ -122,6 +122,7 @@ fn hardware_and_entry_mac_vectors() {
         git_commit: Some("0123456789abcdef0123456789abcdef01234567".into()),
         mac: None,
         material: None,
+        source_check: None,
     };
     entry.sign(&crypto::entry_mac_key(&master).unwrap());
     assert_eq!(
@@ -160,5 +161,30 @@ fn syntax_material_vectors() {
     assert_eq!(
         hex::encode(syntax::hash(reformatted.as_bytes(), "main.rs").unwrap()),
         "892edba33cdf17d1329dbfd7c07a0bba2dd219c9bd2ec6a1362c9b61bef260e4"
+    );
+}
+
+#[test]
+fn sealed_entry_vectors() {
+    use codepass::{crypto, profile::Entry};
+    let hash: [u8; 32] = Sha256::digest(SOURCE).into();
+    let master = crypto::master_key(SECRET, &SALT).unwrap();
+    let check = crypto::code_check(&master, &hash).unwrap();
+    assert_eq!(check, "bceb28107204dc457cc4e94a8ba0074045a6f890688efc3329e7d3e175fb0b0e");
+    let mut entry = Entry {
+        source_sha256: hex::encode(hash),
+        settings: Settings { spec_version: 2, ..settings("github.com", "", 24, Charset::Strong, 1, true) },
+        source_path: Some("/home/me/keys/main.rs".into()),
+        git_commit: None,
+        mac: None,
+        material: None,
+        source_check: None,
+    };
+    entry.seal(&master).unwrap();
+    entry.sign(&crypto::entry_mac_key(&master).unwrap());
+    assert_eq!(entry.source_check.as_deref(), Some(check.as_str()));
+    assert_eq!(
+        entry.mac.as_deref(),
+        Some("947c4cb77a079b01028350bf17f228e5fef9ed9f20c9b2fb5c66a3fd09f1c4a1")
     );
 }

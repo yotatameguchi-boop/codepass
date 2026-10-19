@@ -207,6 +207,24 @@ check_code = WORDS[code[0]] + "-" + WORDS[code[1]] + "-" + WORDS[code[2]]
 `WORDS` は `src/words.rs` の256語（並び順も仕様の一部）。24ビットしかないため、総当たりの手がかりとしては
 生成済みパスワード1つよりはるかに弱い。
 
+## 材料の封印（コードを第2の要素にする）
+
+通常の登録は、生成に使う `code_hash` を `source_sha256` としてそのまま保存する。これだと設定ファイルとシークレットを
+盗まれれば、コードがなくてもパスワードを作れる。封印した登録は `source_sha256` を空にし、代わりに次の値を
+`source_check` として保存する。
+
+```
+check_key    = HKDF-SHA256(salt = "CodePass/HKDF/v1", ikm = master, info = "CodePass/code-check/v1", L = 32)
+source_check = HMAC-SHA256(check_key, code_hash)        -- 64桁の16進
+```
+
+- 生成には `code_hash` をこれまでどおり使うので、**封印してもパスワードは変わらない**。
+- 照合は、シークレットから `master` を作った後に、材料から計算した `code_hash` で `source_check` を作り直して
+  定数時間で比べる。シークレットなしでは照合も推測もできない。
+- 設定ファイル＋シークレットを手に入れた攻撃者は、コードを推測で当てる必要がある。コードが公開されていたり
+  短かったりすると意味がないため、非公開で十分な長さのコードに使う。
+- `generate --seal-code` で最初から封印、`profile seal-code` で既存の登録をまとめて封印する（署名も付け直す）。
+
 ## 設定の改ざん検知（エントリの署名）
 
 プロファイルの各エントリに、`master` から導いた鍵で HMAC-SHA256 の署名（`mac`、64桁の16進）を付ける。
@@ -222,6 +240,7 @@ data    = "CodePass/entry/v1" || 0x00
         || u32be(spec_version)
         || opt(symbols) || opt(source_path) || opt(git_commit)
         || opt(material)                           -- material があるときだけ付ける
+        || 0x02 || lp(source_check)                -- 封印した登録だけ付ける
 mac     = HMAC-SHA256(mac_key, data)
 
 lp(x)  = u32be(len(x)) || x                        -- x は UTF-8 バイト列
@@ -270,7 +289,9 @@ Rust 版と Python 版の結果（エラーになるかどうかも含めて）�
                     "revision": 1, "require_classes": true, "spec_version": 2, "symbols": "!#@" },
       "source_path": "/Users/me/keys/main.py",
       "git_commit": "<コミットID。Gitから読んだときだけ>",
-      "mac": "<署名。64桁の16進>"
+      "mac": "<署名。64桁の16進>",
+      "material": "<構文の材料のときだけ syntax-v1>",
+      "source_check": "<封印した登録だけ。このとき source_sha256 は書かない>"
     }
   ],
   "hardware_key": { "credential_id": "<16進>", "rp_id": "codepass" }

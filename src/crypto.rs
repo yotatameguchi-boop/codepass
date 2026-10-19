@@ -268,6 +268,19 @@ pub fn entry_mac_key(master: &[u8; 32]) -> Result<Zeroizing<[u8; 32]>> {
     Ok(key)
 }
 
+/// Sealed entries keep this instead of the code's hash: it can be checked only by
+/// someone who has the master key, so a stolen settings file plus the secret is not
+/// enough to rebuild the code hash — the code itself is needed (a second factor).
+pub fn code_check(master: &[u8; 32], code_hash: &[u8; 32]) -> Result<String> {
+    let mut key = Zeroizing::new([0u8; 32]);
+    Hkdf::<Sha256>::new(Some(b"CodePass/HKDF/v1"), master)
+        .expand(b"CodePass/code-check/v1", &mut key[..])
+        .map_err(|_| "HKDF処理に失敗しました")?;
+    let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(&key[..]).map_err(|_| "HMAC処理に失敗しました")?;
+    mac.update(code_hash);
+    Ok(hex::encode(mac.finalize().into_bytes()))
+}
+
 /// The 32-byte input sent to the security key's hmac-secret extension. Fixed per
 /// profile, so the key answers the same way every time.
 pub fn hardware_challenge(salt: &[u8; 16]) -> [u8; 32] {

@@ -27,6 +27,14 @@ pub fn load_material(path: &Path, git_rev: Option<&str>, material: Option<&str>)
     Ok(Loaded { sha256, path: absolute(path)?, git_commit })
 }
 
+/// Whether the file sits in a Git repository that has a remote (offline check: it
+/// only reads the repository's configuration). Such code may well be public.
+pub fn has_git_remote(path: &Path) -> bool {
+    let Ok(full) = absolute(path) else { return false };
+    let Some(dir) = full.parent().filter(|d| d.is_dir()) else { return false };
+    git(dir, &["remote"]).is_ok_and(|out| !out.iter().all(u8::is_ascii_whitespace))
+}
+
 /// The file's bytes, from the working tree or from a commit (with its full id).
 pub fn read_bytes(path: &Path, git_rev: Option<&str>) -> Result<(Vec<u8>, Option<String>)> {
     match git_rev {

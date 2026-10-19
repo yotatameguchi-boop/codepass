@@ -31,7 +31,13 @@ fuzz_target!(|data: &[u8]| {
         git_commit: None,
         mac: None,
         material: None,
+        source_check: None,
     };
+    if data[36] & 2 == 2 {
+        // Sealed entries: the check value replaces the hash and is signed too.
+        entry.seal(&key).unwrap();
+        assert!(entry.source_sha256.is_empty());
+    }
     entry.sign(&key);
     assert!(matches!(entry.verify(&key), MacStatus::Valid));
     let mut other = key;

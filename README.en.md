@@ -33,6 +33,13 @@ Rust, Python, JS/TS, Go, C/C++/C#/Java, Kotlin/Scala/Swift/Dart. A small lexer f
 parser whose upgrades could change passwords — reproduced byte for byte by an independent Python implementation
 (30,000 random inputs compared in CI).
 
+## Your code as a second factor (sealing)
+
+Normally the settings file keeps the code's hash, so a stolen settings file plus the secret is enough. After
+`codepass profile seal-code` (or `generate --seal-code`) it keeps only a value that can be checked with the secret,
+so a **private** code file becomes something you *have* — a second factor. Passwords do not change.
+`codepass doctor` warns when the code is short or sits in a repository with a remote.
+
 ## Why source code?
 
 Developers carry their code everywhere, version it with Git, and often care about a particular file (a first program,
@@ -58,7 +65,7 @@ Prebuilt binaries for macOS, Linux and Windows, and the browser extension, are o
 provenance and an SBOM:
 
 ```sh
-gh attestation verify codepass-v0.5.0-aarch64-apple-darwin.tar.gz -R yotatameguchi-boop/codepass
+gh attestation verify codepass-v0.6.0-aarch64-apple-darwin.tar.gz -R yotatameguchi-boop/codepass
 ```
 
 ## Use
