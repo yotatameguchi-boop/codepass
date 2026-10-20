@@ -36,6 +36,7 @@ pub fn generate(
     registered: &str,
     syntax_material: bool,
     file_name: &str,
+    symbol: &str,
 ) -> Result<String, JsError> {
     let err = |m: String| JsError::new(&m);
     let salt: [u8; 16] = hex::decode(salt_hex.trim())
@@ -78,7 +79,9 @@ pub fn generate(
     if let Some(w) = crypto::secret_warning(secret, &["codepass", site, account]) {
         warnings.push(w);
     }
-    let hash: [u8; 32] = if syntax_material {
+    let hash: [u8; 32] = if !symbol.trim().is_empty() {
+        codepass::syntax::symbol_hash(source, file_name, symbol.trim()).map_err(err)?
+    } else if syntax_material {
         codepass::syntax::hash(source, file_name).map_err(err)?
     } else {
         Sha256::digest(source).into()
@@ -121,6 +124,7 @@ struct EntrySummary {
     signed: bool,
     material: Option<String>,
     sealed: bool,
+    symbol: Option<String>,
 }
 
 fn summarize(index: usize, e: &codepass::profile::Entry) -> EntrySummary {
@@ -138,6 +142,7 @@ fn summarize(index: usize, e: &codepass::profile::Entry) -> EntrySummary {
             None => e.source_sha256.to_ascii_lowercase(),
         },
         sealed: e.is_sealed(),
+        symbol: e.symbol.clone(),
         source_path: e.source_path.clone(),
         git_commit: e.git_commit.clone(),
         signed: e.mac.is_some(),
@@ -148,13 +153,26 @@ fn summarize(index: usize, e: &codepass::profile::Entry) -> EntrySummary {
 /// The hash an entry expects from `source`: the bytes, or (syntax material) the token
 /// stream, with the language taken from the file name the entry was registered with.
 fn entry_material_hash(e: &codepass::profile::Entry, source: &[u8]) -> Result<[u8; 32], String> {
-    match e.material.as_deref() {
-        None => Ok(Sha256::digest(source).into()),
-        Some(_) => {
-            let path = e.source_path.as_deref().ok_or("構文の材料の登録にはファイル名が必要です")?;
-            let name = path.rsplit(['/', '\\']).next().unwrap_or(path);
-            codepass::syntax::hash(source, name)
+    if e.material.as_deref() == Some("tree-v1") {
+        return Err(
+            "リポジトリ全体を材料にした登録は、Git が必要なので CLI（codepass get）で使ってください".into()
+        );
+    }
+    if e.signer.is_some() {
+        return Err(
+            "署名したコミットだけを認める登録は、署名の確認に Git が必要なので CLI で使ってください".into()
+        );
+    }
+    let name = || {
+        let path = e.source_path.as_deref().ok_or("構文の材料の登録にはファイル名が必要です")?;
+        Ok::<_, String>(path.rsplit(['/', '\\']).next().unwrap_or(path).to_string())
+    };
+    match (e.material.as_deref(), &e.symbol) {
+        (None, _) => Ok(Sha256::digest(source).into()),
+        (Some(codepass::syntax::SYMBOL_MATERIAL_ID), Some(symbol)) => {
+            codepass::syntax::symbol_hash(source, &name()?, symbol)
         }
+        (Some(_), _) => codepass::syntax::hash(source, &name()?),
     }
 }
 
@@ -183,6 +201,46 @@ pub fn syntax_preview(code: &str, file_name: &str) -> Result<String, JsError> {
         }
         let hash = hex::encode(codepass::syntax::hash(code.as_bytes(), file_name)?);
         serde_json::to_string(&Preview { lang: lang.id(), tokens, hash }).map_err(|e| e.to_string())
+    })())
+}
+
+/// The definitions (functions, classes, constants) a file holds, with the token
+/// stream and hash of `symbol` (or of the first one when `symbol` is empty).
+#[wasm_bindgen]
+pub fn symbol_preview(code: &str, file_name: &str, symbol: &str) -> Result<String, JsError> {
+    js((|| {
+        let lang = codepass::syntax::lang_for(file_name)?;
+        let toks = codepass::syntax::tokens(code, lang)?;
+        let defs = codepass::syntax::definitions(&toks, lang);
+        let mut names: Vec<String> = Vec::new();
+        for (n, _) in &defs {
+            if !names.contains(n) {
+                names.push(n.clone());
+            }
+        }
+        let chosen = if symbol.trim().is_empty() {
+            names.first().cloned().unwrap_or_default()
+        } else {
+            symbol.trim().to_string()
+        };
+        #[derive(Serialize)]
+        struct Preview {
+            lang: &'static str,
+            names: Vec<String>,
+            symbol: String,
+            tokens: Vec<String>,
+            hash: String,
+        }
+        let (tokens, hash) = if chosen.is_empty() {
+            (Vec::new(), String::new())
+        } else {
+            (
+                codepass::syntax::symbol_tokens(code, lang, &chosen)?,
+                hex::encode(codepass::syntax::symbol_hash(code.as_bytes(), file_name, &chosen)?),
+            )
+        };
+        serde_json::to_string(&Preview { lang: lang.id(), names, symbol: chosen, tokens, hash })
+            .map_err(|e| e.to_string())
     })())
 }
 
@@ -465,6 +523,8 @@ mod tests {
             mac: None,
             material: None,
             source_check: None,
+            symbol: None,
+            signer: None,
         };
         e.sign(&crypto::entry_mac_key(&master).unwrap());
         p.entries.push(e);

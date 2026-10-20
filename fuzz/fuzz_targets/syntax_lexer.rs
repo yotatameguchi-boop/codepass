@@ -10,6 +10,11 @@ fuzz_target!(|data: &[u8]| {
     let Ok(text) = std::str::from_utf8(rest) else { return };
     let lang = [Lang::C, Lang::Js, Lang::Go, Lang::Rust, Lang::Nested, Lang::Python][pick as usize % 6];
     let Ok(toks) = tokens(text, lang) else { return };
+    // Every definition range lies inside the token stream and starts at its name or definer.
+    for (name, range) in codepass::syntax::definitions(&toks, lang) {
+        assert!(range.start < range.end && range.end <= toks.len(), "{name} {range:?}");
+        assert!(toks[range.clone()].contains(&name));
+    }
     if matches!(lang, Lang::C | Lang::Js | Lang::Go | Lang::Nested) {
         let again = tokens(&toks.join(" "), lang).expect("re-tokenizing its own output");
         assert_eq!(again, toks, "input {text:?}");

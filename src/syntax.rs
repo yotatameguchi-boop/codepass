@@ -401,6 +401,192 @@ pub fn hash(bytes: &[u8], file_name: &str) -> Result<[u8; 32]> {
     Ok(h.finalize().into())
 }
 
+// ---- Symbol material: one definition (function, class, constant) of a file ----
+
+pub const SYMBOL_MATERIAL_ID: &str = "symbol-v1";
+
+/// Words that introduce a definition in the supported languages.
+const DEFINERS: &[&str] = &[
+    "fn",
+    "func",
+    "function",
+    "def",
+    "class",
+    "struct",
+    "enum",
+    "trait",
+    "interface",
+    "type",
+    "impl",
+    "mod",
+    "module",
+    "object",
+    "fun",
+    "val",
+    "var",
+    "let",
+    "const",
+    "static",
+    "union",
+    "namespace",
+    "record",
+    "mut",
+];
+
+/// Words that can stand before `name(` without it being a definition (C-style rule).
+const NOT_A_TYPE: &[&str] = &[
+    "if", "while", "for", "switch", "return", "else", "catch", "sizeof", "new", "case", "do", "throw",
+    "await",
+];
+
+fn is_word_token(t: &str) -> bool {
+    !t.is_empty() && t.chars().all(is_word)
+}
+
+/// End (exclusive) of a brace-language definition whose name is at `at`: through the
+/// matching `}` of the first `{` outside parentheses and brackets, or through the first
+/// `;` met before any such `{`, or to the end.
+fn c_like_end(tokens: &[String], at: usize) -> Option<(usize, bool)> {
+    let mut round = 0i32;
+    let mut j = at + 1;
+    while j < tokens.len() {
+        match tokens[j].as_str() {
+            "(" | "[" => round += 1,
+            ")" | "]" => round -= 1,
+            ";" if round <= 0 => return Some((j + 1, false)),
+            "{" if round <= 0 => {
+                let mut braces = 0i32;
+                for (k, t) in tokens.iter().enumerate().skip(j) {
+                    match t.as_str() {
+                        "{" => braces += 1,
+                        "}" => {
+                            braces -= 1;
+                            if braces == 0 {
+                                return Some((k + 1, true));
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                return Some((tokens.len(), true));
+            }
+            _ => {}
+        }
+        j += 1;
+    }
+    Some((tokens.len(), false))
+}
+
+/// End (exclusive) of a Python `def`/`class` at `start`: its indented block, or the
+/// rest of its line for a one-line definition.
+fn python_block_end(tokens: &[String], start: usize) -> usize {
+    let mut j = start;
+    while j < tokens.len() && tokens[j] != NEWLINE {
+        j += 1;
+    }
+    if j + 1 < tokens.len() && tokens[j + 1] == INDENT {
+        let mut level = 0i32;
+        for (k, t) in tokens.iter().enumerate().skip(j + 1) {
+            if t == INDENT {
+                level += 1;
+            } else if t == DEDENT {
+                level -= 1;
+                if level == 0 {
+                    return k + 1;
+                }
+            }
+        }
+        return tokens.len();
+    }
+    (j + 1).min(tokens.len())
+}
+
+fn line_end(tokens: &[String], start: usize) -> usize {
+    let mut j = start;
+    while j < tokens.len() && tokens[j] != NEWLINE {
+        j += 1;
+    }
+    (j + 1).min(tokens.len())
+}
+
+/// Every definition the file holds, in order: (name, token range). Rules, tried in
+/// this order for each token (docs/SPEC.md "関数単位の材料"):
+/// 1. a word right after a definer word (`fn name`, `def name`, `const name`, …);
+/// 2. Python: a word at the start of a statement followed by `=`;
+/// 3. brace languages: `name(` after a type-like token, whose body `{` comes before any `;`.
+pub fn definitions(tokens: &[String], lang: Lang) -> Vec<(String, std::ops::Range<usize>)> {
+    let mut out = Vec::new();
+    for i in 0..tokens.len() {
+        let name = &tokens[i];
+        if !is_word_token(name) || DEFINERS.contains(&name.as_str()) {
+            continue;
+        }
+        let prev = i.checked_sub(1).map(|p| tokens[p].as_str());
+        let next = tokens.get(i + 1).map(String::as_str);
+        // `static int key(`: a word followed by another word is a type, not the name.
+        let names_something = !next.is_some_and(is_word_token);
+        // `&'static str`: a word right after a lifetime mark is not a definer.
+        let after_lifetime = i >= 2 && tokens[i - 2] == "'";
+        if prev.is_some_and(|p| DEFINERS.contains(&p)) && names_something && !after_lifetime {
+            let start = i - 1;
+            let end = if lang == Lang::Python {
+                if matches!(tokens[start].as_str(), "def" | "class") {
+                    python_block_end(tokens, start)
+                } else {
+                    line_end(tokens, start)
+                }
+            } else {
+                c_like_end(tokens, i).map_or(tokens.len(), |(e, _)| e)
+            };
+            out.push((name.clone(), start..end));
+            continue;
+        }
+        if lang == Lang::Python {
+            let at_statement_start = matches!(prev, None | Some(NEWLINE) | Some(INDENT) | Some(DEDENT));
+            if at_statement_start && next == Some("=") {
+                out.push((name.clone(), i..line_end(tokens, i)));
+            }
+            continue;
+        }
+        let type_like = prev.is_some_and(|p| {
+            (is_word_token(p) && !NOT_A_TYPE.contains(&p)) || matches!(p, "*" | "&" | ">" | "]" | ")")
+        });
+        if type_like && next == Some("(") {
+            if let Some((end, true)) = c_like_end(tokens, i) {
+                out.push((name.clone(), i..end));
+            }
+        }
+    }
+    out
+}
+
+/// The tokens of the first definition named `name`.
+pub fn symbol_tokens(text: &str, lang: Lang, name: &str) -> Result<Vec<String>> {
+    let toks = tokens(text, lang)?;
+    let (_, range) = definitions(&toks, lang)
+        .into_iter()
+        .find(|(n, _)| n == name)
+        .ok_or_else(|| format!("「{name}」という定義（関数・クラス・定数など）が見つかりません"))?;
+    Ok(toks[range].to_vec())
+}
+
+pub fn symbol_hash(bytes: &[u8], file_name: &str, name: &str) -> Result<[u8; 32]> {
+    if !is_word_token(name) {
+        return Err("--symbol には関数名などの名前を1つ指定してください".into());
+    }
+    let lang = lang_for(file_name)?;
+    let text = std::str::from_utf8(bytes)
+        .map_err(|_| "構文の材料には UTF-8 のテキストファイルが必要です".to_string())?;
+    let toks = symbol_tokens(text, lang, name)?;
+    let mut h = Sha256::new();
+    h.update(format!("CodePass/{SYMBOL_MATERIAL_ID}\0{}\0{name}\0", lang.id()).as_bytes());
+    for t in &toks {
+        h.update((t.len() as u32).to_be_bytes());
+        h.update(t.as_bytes());
+    }
+    Ok(h.finalize().into())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -442,6 +628,55 @@ mod tests {
         differ("main.rs", base, "fn main() {\n    let x = add(1, 3);\n    println!(\"{x}\");\n}\n");
         differ("main.rs", base, "fn main() {\n    let y = add(1, 2);\n    println!(\"{y}\");\n}\n");
         differ("main.rs", base, "fn main() {\n    let x = add(1, 2);\n    println!(\"{ x}\");\n}\n");
+    }
+
+    #[test]
+    fn a_function_is_its_own_key() {
+        let file = "fn github_key() -> u64 {\n    0x5eed + 1\n}\n\nfn aws_key() -> u64 {\n    42\n}\n";
+        let edited_aws = file.replace("42", "43");
+        let gh = |f: &str| symbol_hash(f.as_bytes(), "keys.rs", "github_key").unwrap();
+        let aws = |f: &str| symbol_hash(f.as_bytes(), "keys.rs", "aws_key").unwrap();
+        assert_eq!(gh(file), gh(&edited_aws), "editing another function leaves this key alone");
+        assert_ne!(aws(file), aws(&edited_aws), "editing the function changes its key");
+        assert_eq!(gh(file), gh(&format!("// keyring\n{file}// end\n")), "comments outside do not matter");
+        assert_ne!(gh(file), aws(file));
+        let toks = symbol_tokens(file, Lang::Rust, "github_key").unwrap();
+        assert_eq!(toks.first().map(String::as_str), Some("fn"));
+        assert_eq!(toks.last().map(String::as_str), Some("}"));
+        assert!(symbol_hash(file.as_bytes(), "keys.rs", "missing").is_err());
+    }
+
+    #[test]
+    fn definitions_in_each_language() {
+        let names = |code: &str, file: &str| {
+            let lang = Lang::for_file(file).unwrap();
+            definitions(&tokens(code, lang).unwrap(), lang).into_iter().map(|(n, _)| n).collect::<Vec<_>>()
+        };
+        assert_eq!(names("impl Keys { fn a(&self) {} fn b() -> u8 { 1 } }", "k.rs"), ["Keys", "a", "b"]);
+        assert_eq!(names("fn f() { let mut x = 1; }", "k.rs"), ["f", "x"]);
+        assert_eq!(names("fn k() -> &'static str { \"a\" }", "k.rs"), ["k"], "a lifetime is not a definer");
+        assert_eq!(
+            names("def a(x):\n    return x\n\nclass B:\n    def c(self):\n        pass\nD = 1\n", "k.py"),
+            ["a", "B", "c", "D"]
+        );
+        assert_eq!(
+            names("function a() { return 1 }\nconst b = () => { return 2 };\nlet c = 3;", "k.js"),
+            ["a", "b", "c"]
+        );
+        assert_eq!(names("func (r *T) A() int { return 1 }\nfunc B() {}", "k.go"), ["A", "B"]);
+        assert_eq!(
+            names("static int key(void) { return 1; }\nint main() { if (key()) {} return 0; }", "k.c"),
+            ["key", "main"]
+        );
+        // A one-line Python def ends with its line; a block ends with its dedent.
+        let py = "def a(): return 1\ndef b():\n    x = 1\n    return x\nz = 2\n";
+        let t = tokens(py, Lang::Python).unwrap();
+        let defs = definitions(&t, Lang::Python);
+        let a = &t[defs.iter().find(|(n, _)| n == "a").unwrap().1.clone()];
+        assert_eq!(a.last().map(String::as_str), Some(NEWLINE));
+        assert!(!a.contains(&"b".to_string()));
+        let b = &t[defs.iter().find(|(n, _)| n == "b").unwrap().1.clone()];
+        assert!(b.contains(&"x".to_string()) && !b.contains(&"z".to_string()));
     }
 
     #[test]

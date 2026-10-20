@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "CodePass",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "description": "ソースコードから同じパスワードを作り直す CodePass のブラウザ拡張。開いているページの本当のドメインで判定し、そっくりな偽ドメインには入力しません。",
   "minimum_chrome_version": "116",
   "action": {

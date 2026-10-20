@@ -39,7 +39,9 @@ async function render() {
   for (const e of info.entries) {
     const tr = document.createElement("tr");
     const ok = Boolean(sources[e.source_sha256]);
-    const kind = (e.material ? "（構文）" : "") + (e.sealed ? "（封印）" : "");
+    const kind =
+      (e.symbol ? `（関数 ${e.symbol}）` : e.material === "tree-v1" ? "（リポジトリ・CLIのみ）" : e.material ? "（構文）" : "") +
+      (e.sealed ? "（封印）" : "");
     const cells = [e.site, e.account || "—", String(e.revision), (ok ? "✓ 読み込み済み" : "未読み込み") + kind];
     for (const text of cells) {
       const td = document.createElement("td");

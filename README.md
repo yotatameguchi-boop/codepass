@@ -15,6 +15,30 @@
 | **ブラウザ拡張** | ログイン画面でアイコンを押し、シークレットを入れるだけ。開いているページの本当のドメインで判定し、そっくりな偽サイトには入力しない |
 | **Web デモ** | https://yotatameguchi-boop.github.io/codepass/ （インストール不要・通信なし） |
 
+## 1つのリポジトリが、鍵束になる
+
+ソースコードだけが持つ性質を、そのままパスワードの仕組みにしています。
+
+| ソースコードの性質 | CodePass での使い方 |
+|---|---|
+| 構造がある（構文） | 整形やコメントを変えても同じパスワード（`--material syntax`） |
+| 関数という単位に分かれる | **1つの関数を1つのサービスの鍵にする**（`--symbol`）。ほかの関数を書き換えても変わらず、その関数を書き換えればそのサービスだけが変わる |
+| 誰が書いたか証明できる（Git の署名） | **自分が署名したコミットだけを材料として認める**（`--require-signed`） |
+| 履歴が残る（Git） | コミットで材料を固定する（`--git`）。古いパスワードも古いコミットから作り直せる |
+| 大量の中身がある（リポジトリ） | **リポジトリ全体を材料にする**（`--tree`）。封印と組み合わせれば、非公開のリポジトリそのものが第2の要素 |
+
+```sh
+codepass inspect keys.rs --symbols                     # このファイルで鍵にできる関数の一覧
+codepass generate keys.rs --site github.com --symbol github_key --git v1 --require-signed --seal-code
+codepass generate . --site vault.example.com --tree --git v1 --require-signed --seal-code
+```
+
+```rust
+// keys.rs — サービスごとに1つの関数
+fn github_key() -> &'static str { "the quick brown fox jumps over the lazy dog" }
+fn aws_key() -> u64 { 0x5eed_cafe ^ 42 }   // ← ここを書き換えると AWS のパスワードだけが変わる
+```
+
 ## コードの「意味」が鍵になる
 
 `--material syntax` で登録すると、パスワードはコードの**意味（構文）**から作られます。
@@ -110,7 +134,7 @@ Releases のファイルには、GitHub Actions がこのリポジトリのソ�
 SLSA build provenance）と、部品表（SBOM）が付いています。GitHub CLI で誰でも確認できます。
 
 ```sh
-gh attestation verify codepass-v0.7.0-aarch64-apple-darwin.tar.gz -R yotatameguchi-boop/codepass
+gh attestation verify codepass-v0.8.0-aarch64-apple-darwin.tar.gz -R yotatameguchi-boop/codepass
 ```
 
 ### ブラウザ拡張（Chrome / Edge）

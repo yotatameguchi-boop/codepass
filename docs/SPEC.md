@@ -242,6 +242,52 @@ check_code = WORDS[code[0]] + "-" + WORDS[code[1]] + "-" + WORDS[code[2]]
 `WORDS` は `src/words.rs` の256語（並び順も仕様の一部）。24ビットしかないため、総当たりの手がかりとしては
 生成済みパスワード1つよりはるかに弱い。
 
+## 関数単位の材料（`material = "symbol-v1"`）
+
+`--symbol <名前>` で登録したエントリは、ファイルの中の1つの定義（関数・クラス・定数など）の字句だけを材料にする。
+同じファイルのほかの部分を書き換えても、この材料は変わらない。1つのファイルを、サービスごとに関数を割り当てた「鍵束」にできる。
+
+```
+code_hash = SHA-256("CodePass/symbol-v1" || 0x00 || lang || 0x00 || 名前 || 0x00 || Σ (u32be(len(tok)) || tok))
+```
+
+字句は上の「構文の材料」の規則で切り出した列。その中で、次の規則で見つかった**最初の**定義の範囲を使う
+（各字句について、1→2→3 の順に試す）:
+
+1. 字句 `w` が語で、直前の字句が定義語（`fn func function def class struct enum trait interface type impl mod module
+   object fun val var let const static union namespace record mut`）であり、`w` 自身は定義語でなく、直後の字句が語でなく、
+   2つ前の字句が `'` でない（`&'static str` を除くため）とき、`w` を名前とする。範囲は定義語から:
+   - Python の `def` `class`: その行の `NEWLINE` まで。直後に `INDENT` があれば、対応する `DEDENT` まで
+   - Python のそれ以外: その行の `NEWLINE` まで
+   - それ以外の言語: `w` の後で、`(` `[` の外にある最初の `{` に対応する `}` まで。それより先に `;` があればその `;` まで。
+     どちらもなければ最後まで
+2. Python で、文の先頭（直前が `NEWLINE` `INDENT` `DEDENT` か、ファイルの最初）の語のすぐ後が `=` のとき、その語から行の `NEWLINE` まで。
+3. Python 以外で、語 `w` の直後が `(` で、直前が語（`if while for switch return else catch sizeof new case do throw await` を除く）か
+   `* & > ] )` のいずれかであり、1 の規則の `{` が `;` より先に見つかるとき（C・Java・Go のメソッドなど）、`w` から対応する `}` まで。
+
+`definitions` はこれらを順に集めた一覧で、`inspect --symbols` が表示する。`docs/reference_syntax.py` はこの規則だけから
+書いた別実装で、ランダムな3万件の入力について、定義の一覧と各定義のハッシュが Rust 版と完全に一致することを CI で確かめている。
+
+## リポジトリ単位の材料（`material = "tree-v1"`）
+
+`--tree --git <REV>` で、フォルダ（リポジトリ全体やその中のディレクトリ）を材料にする。
+
+```
+tree      = git rev-parse <commit>:./     -- そのフォルダの Git のツリーオブジェクトの ID（40 または 64 桁の16進）
+code_hash = SHA-256("CodePass/tree-v1" || 0x00 || tree)
+```
+
+ツリーの ID は、その下のすべてのファイルの中身と名前から Git が計算する。どれか1つでも変われば別の値になる。
+コミットの指定が必須（作業中のフォルダは材料にしない）。Git の外では計算できないので、ブラウザ版・拡張では使えない。
+封印と組み合わせると、非公開のリポジトリ全体が第2の要素になる。
+
+## 署名したコミットだけを材料にする（`signer`）
+
+`--require-signed`（`--git` と一緒に使う）で登録すると、コミットに有効な署名があることを Git 自身の検証
+（`git log -1 --format=%G?%x00%GK <commit>` が `G` を返すこと。GPG、または `gpg.ssh.allowedSignersFile` を使った SSH 署名）で確かめ、
+署名した鍵（`%GK`）を `signer` に記録する。`get` などのたびに同じ鍵で署名されていることを確かめる。
+誰かがリポジトリに別のコミットを入れても、自分の鍵で署名されていなければ材料として使われない。
+
 ## 材料の封印（コードを第2の要素にする）
 
 通常の登録は、生成に使う `code_hash` を `source_sha256` としてそのまま保存する。これだと設定ファイルとシークレットを
@@ -276,6 +322,8 @@ data    = "CodePass/entry/v1" || 0x00
         || opt(symbols) || opt(source_path) || opt(git_commit)
         || opt(material)                           -- material があるときだけ付ける
         || 0x02 || lp(source_check)                -- 封印した登録だけ付ける
+        || 0x03 || lp(symbol)                      -- 関数単位の材料だけ付ける
+        || 0x04 || lp(signer)                      -- 署名したコミットだけを認める登録だけ付ける
 mac     = HMAC-SHA256(mac_key, data)
 
 lp(x)  = u32be(len(x)) || x                        -- x は UTF-8 バイト列

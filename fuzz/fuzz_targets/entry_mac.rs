@@ -32,6 +32,8 @@ fuzz_target!(|data: &[u8]| {
         mac: None,
         material: None,
         source_check: None,
+        symbol: None,
+        signer: None,
     };
     if data[36] & 2 == 2 {
         // Sealed entries: the check value replaces the hash and is signed too.

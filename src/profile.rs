@@ -73,6 +73,12 @@ pub struct Entry {
     /// master key can verify (crypto::code_check). Then the code is a second factor.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_check: Option<String>,
+    /// Function-level material (`symbol-v1`): the definition whose tokens are the key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub symbol: Option<String>,
+    /// Signed-commit material: the key that must have signed `git_commit`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signer: Option<String>,
 }
 
 pub enum MacStatus {
@@ -123,6 +129,14 @@ impl Entry {
         if let Some(check) = &self.source_check {
             out.push(2);
             put(&mut out, check.as_bytes());
+        }
+        if let Some(symbol) = &self.symbol {
+            out.push(3);
+            put(&mut out, symbol.as_bytes());
+        }
+        if let Some(signer) = &self.signer {
+            out.push(4);
+            put(&mut out, signer.as_bytes());
         }
         out
     }
@@ -337,8 +351,19 @@ impl Profile {
             }) {
                 return Err("GitのコミットIDが不正です".into());
             }
-            if entry.material.as_deref().is_some_and(|m| m != crate::syntax::MATERIAL_ID) {
-                return Err("未対応の材料の種類です。codepass を更新してください".into());
+            match (entry.material.as_deref(), &entry.symbol) {
+                (None | Some(crate::syntax::MATERIAL_ID), None) => {}
+                (Some(crate::syntax::SYMBOL_MATERIAL_ID), Some(sym))
+                    if !sym.is_empty() && sym.len() <= 256 && sym.chars().all(crate::syntax::is_word) => {}
+                (Some(crate::source::TREE_MATERIAL_ID), None) if entry.git_commit.is_some() => {}
+                _ => return Err("未対応の材料の種類です。codepass を更新してください".into()),
+            }
+            if entry
+                .signer
+                .as_ref()
+                .is_some_and(|k| k.is_empty() || k.len() > 512 || entry.git_commit.is_none())
+            {
+                return Err("署名の鍵の記録が不正です".into());
             }
             if entry.mac.as_ref().is_some_and(|m| m.len() != 64 || !m.bytes().all(|b| b.is_ascii_hexdigit()))
             {
@@ -467,6 +492,8 @@ mod tests {
             mac: None,
             material: None,
             source_check: None,
+            symbol: None,
+            signer: None,
             settings: Settings {
                 site: site.into(),
                 account: "".into(),

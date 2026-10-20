@@ -87,6 +87,22 @@ enum Command {
         #[arg(long, value_enum, default_value_t = Material::Bytes,
             help = "コードのどこを材料にするか。syntax なら整形やコメントを変えても同じパスワード")]
         material: Material,
+        #[arg(
+            long,
+            value_name = "名前",
+            conflicts_with = "tree",
+            help = "ファイルの中の1つの関数（クラス・定数）だけを材料にする。ほかの関数を書き換えても変わらない"
+        )]
+        symbol: Option<String>,
+        #[arg(
+            long,
+            requires = "git",
+            conflicts_with = "material",
+            help = "フォルダ（リポジトリ）全体を材料にする（--git が必要）"
+        )]
+        tree: bool,
+        #[arg(long, requires = "git", help = "自分が署名したコミットだけを材料として認める（--git が必要）")]
+        require_signed: bool,
         #[arg(long, help = "設定を登録しない")]
         no_save: bool,
         #[arg(long, conflicts_with = "no_save", help = "同じサービス・更新番号の登録済み設定を置き換える")]
@@ -136,6 +152,12 @@ enum Command {
         git: Option<String>,
         #[arg(long, help = "使われるトークンをすべて表示する")]
         all: bool,
+        #[arg(long, help = "ファイルの中で鍵にできる定義（関数・クラス・定数）を一覧する")]
+        symbols: bool,
+        #[arg(long, value_name = "名前", help = "この定義だけを材料にしたときに使われる部分を表示する")]
+        symbol: Option<String>,
+        #[arg(long, requires = "git", help = "フォルダ全体（Git のツリー）を材料にしたときの内容を表示する")]
+        tree: bool,
     },
     #[command(about = "緊急用アカウント向け: 決めた人数がそろったときだけパスワードを作れるチームの設定")]
     Team {
@@ -252,7 +274,17 @@ fn run() -> Result<()> {
     match cli.command {
         Command::Bench => bench()?,
         Command::Doctor => doctor(&path)?,
-        Command::Inspect { source, git, all } => inspect(&source, git.as_deref(), all)?,
+        Command::Inspect { source, git, all, symbols, symbol, tree } => {
+            if tree {
+                inspect_tree(&source, git.as_deref().expect("required by clap"))?
+            } else if symbols {
+                inspect_symbols(&source, git.as_deref())?
+            } else if let Some(name) = symbol {
+                inspect_symbol(&source, git.as_deref(), &name, all)?
+            } else {
+                inspect(&source, git.as_deref(), all)?
+            }
+        }
         Command::Team { command } => match command {
             TeamCommand::Init { threshold, shares, share_dir } => {
                 team_init(&path, threshold, shares, share_dir)?
@@ -309,6 +341,15 @@ fn run() -> Result<()> {
                         _ if e.is_sealed() => "（場所の記録なし）".to_string(),
                         _ => format!("コード{}", &e.source_sha256[..16]),
                     };
+                    if let Some(sym) = &e.symbol {
+                        from.push_str(&format!(" [関数 {sym}]"));
+                    }
+                    if e.material.as_deref() == Some(source::TREE_MATERIAL_ID) {
+                        from.push_str(" [ツリー]");
+                    }
+                    if e.signer.is_some() {
+                        from.push_str(" [署名]");
+                    }
                     if e.is_sealed() {
                         from.push_str(" [封印]");
                     }
@@ -365,8 +406,7 @@ fn run() -> Result<()> {
                 .source_path
                 .as_ref()
                 .ok_or("この設定にはファイルの場所が記録されていません。regenerate を使ってください")?;
-            let loaded =
-                source::load_material(file.as_ref(), e.git_commit.as_deref(), e.material.as_deref())?;
+            let loaded = load_entry_code(e, file.as_ref())?;
             // Unsealed entries can be checked before asking for the secret.
             if !e.is_sealed() && !e.code_matches(&loaded.sha256, &[0; 32]) {
                 return Err(if e.material.is_some() {
@@ -394,7 +434,7 @@ fn run() -> Result<()> {
                 .checked_sub(1)
                 .and_then(|i| p.entries.get(i))
                 .ok_or("指定された番号の設定エントリがありません")?;
-            let loaded = source::load_material(&source, e.git_commit.as_deref(), e.material.as_deref())?;
+            let loaded = load_entry_code(e, &source)?;
             if !e.is_sealed() && !e.code_matches(&loaded.sha256, &[0; 32]) {
                 return Err(
                     "ソースコードの内容が保存時と一致しません（1バイトでも違うと別のパスワードになります）"
@@ -420,6 +460,9 @@ fn run() -> Result<()> {
             no_require_classes,
             git,
             material,
+            symbol,
+            tree,
+            require_signed,
             no_save,
             replace,
             export_settings,
@@ -461,7 +504,23 @@ fn run() -> Result<()> {
                     look.join("」「")
                 ));
             }
-            let loaded = source::load_material(&source, git.as_deref(), material.id())?;
+            let material_id = if tree {
+                Some(source::TREE_MATERIAL_ID)
+            } else if symbol.is_some() {
+                Some(codepass::syntax::SYMBOL_MATERIAL_ID)
+            } else {
+                material.id()
+            };
+            let loaded = source::load_material(&source, git.as_deref(), material_id, symbol.as_deref())?;
+            let signer = if require_signed {
+                let commit =
+                    loaded.git_commit.as_deref().ok_or("--require-signed は --git と一緒に使います")?;
+                let key = source::signer_of(&source, commit)?;
+                eprintln!("コミットの署名を確認しました（鍵 {key}）");
+                Some(key)
+            } else {
+                None
+            };
             let source_path = loaded.path.to_str().map(str::to_string);
             if source_path.is_none() && !no_save {
                 eprintln!("警告: パスがUTF-8でないため、ファイルの場所は記録しません");
@@ -472,8 +531,10 @@ fn run() -> Result<()> {
                 source_path,
                 git_commit: loaded.git_commit.clone(),
                 mac: None,
-                material: material.id().map(str::to_string),
+                material: material_id.map(str::to_string),
                 source_check: None,
+                symbol: symbol.clone(),
+                signer,
             };
             // Check before asking for the secret: a mismatch usually means the file changed.
             // (A sealed registration can only be compared once the secret is known.)
@@ -640,6 +701,77 @@ fn inspect(path: &std::path::Path, git: Option<&str>, all: bool) -> Result<()> {
     Ok(())
 }
 
+/// Loads an entry's code the way it was registered (bytes, syntax, one function or a
+/// whole tree) and, for signed-commit entries, checks the commit's signing key.
+fn load_entry_code(e: &Entry, path: &std::path::Path) -> Result<source::Loaded> {
+    let loaded =
+        source::load_material(path, e.git_commit.as_deref(), e.material.as_deref(), e.symbol.as_deref())?;
+    if let (Some(expected), Some(commit)) = (&e.signer, &loaded.git_commit) {
+        let key = source::signer_of(path, commit)?;
+        if &key != expected {
+            return Err(format!("コミットの署名の鍵が登録時と違います（登録時 {expected}・今回 {key}）"));
+        }
+    }
+    Ok(loaded)
+}
+
+fn inspect_symbols(path: &std::path::Path, git: Option<&str>) -> Result<()> {
+    use codepass::syntax;
+    let name = path.file_name().and_then(|n| n.to_str()).ok_or("ファイル名はUTF-8である必要があります")?;
+    let lang = syntax::lang_for(name)?;
+    let (bytes, _) = source::read_bytes(path, git)?;
+    let text = std::str::from_utf8(&bytes).map_err(|_| "UTF-8 のテキストファイルではありません")?;
+    let toks = syntax::tokens(text, lang)?;
+    let defs = syntax::definitions(&toks, lang);
+    println!("{name} の中で鍵にできる定義（{} 個）:", defs.len());
+    let mut seen = std::collections::HashSet::new();
+    for (n, range) in &defs {
+        let first = if seen.insert(n.clone()) {
+            ""
+        } else {
+            "（同じ名前の2つ目以降。--symbol では最初のものを使う）"
+        };
+        println!("  {:<24} {} 個のトークン{first}", n, range.len());
+    }
+    println!("\n例: codepass generate {} --site github.com --symbol <名前>", path.display());
+    Ok(())
+}
+
+fn inspect_symbol(path: &std::path::Path, git: Option<&str>, symbol: &str, all: bool) -> Result<()> {
+    use codepass::syntax;
+    let name = path.file_name().and_then(|n| n.to_str()).ok_or("ファイル名はUTF-8である必要があります")?;
+    let lang = syntax::lang_for(name)?;
+    let (bytes, _) = source::read_bytes(path, git)?;
+    let text = std::str::from_utf8(&bytes).map_err(|_| "UTF-8 のテキストファイルではありません")?;
+    let toks = syntax::symbol_tokens(text, lang, symbol)?;
+    let shown: Vec<&str> = toks
+        .iter()
+        .map(|t| match t.as_str() {
+            syntax::NEWLINE => "⏎",
+            syntax::INDENT => "⇥",
+            syntax::DEDENT => "⇤",
+            other => other,
+        })
+        .collect();
+    let limit = if all { shown.len() } else { shown.len().min(60) };
+    println!("定義「{symbol}」（{}）: {} 個のトークン", lang.id(), toks.len());
+    println!("\n{}{}\n", shown[..limit].join(" "), if limit < shown.len() { " …" } else { "" });
+    println!("この定義のハッシュ: {}", hex::encode(syntax::symbol_hash(&bytes, name, symbol)?));
+    println!("\nファイルのほかの部分を書き換えても、このハッシュ（= パスワード）は変わりません。");
+    Ok(())
+}
+
+fn inspect_tree(path: &std::path::Path, rev: &str) -> Result<()> {
+    let (commit, tree, files) = source::tree_summary(path, rev)?;
+    let loaded = source::load_material(path, Some(rev), Some(source::TREE_MATERIAL_ID), None)?;
+    println!("フォルダ: {}", loaded.path.display());
+    println!("コミット: {commit}");
+    println!("Git のツリー: {tree}（ファイル {files} 個）");
+    println!("材料のハッシュ: {}", hex::encode(loaded.sha256));
+    println!("\nこのフォルダの下のどのファイルが1バイト変わっても、別のパスワードになります。");
+    Ok(())
+}
+
 /// One line of the doctor's report.
 enum Check {
     Ok(String),
@@ -704,10 +836,7 @@ fn doctor(path: &std::path::Path) -> Result<()> {
         );
         let source = match &e.source_path {
             None => Err("ファイルの場所が記録されていません（regenerate でのみ使えます）".to_string()),
-            Some(file) => {
-                source::load_material(file.as_ref(), e.git_commit.as_deref(), e.material.as_deref())
-                    .map_err(|err| format!("{file}: {err}"))
-            }
+            Some(file) => load_entry_code(e, file.as_ref()).map_err(|err| format!("{file}: {err}")),
         };
         match source {
             // A sealed registration hides the hash: only "the code is readable" can be
@@ -1201,7 +1330,7 @@ fn registered_code_hash(e: &Entry, master: &[u8; 32]) -> Result<[u8; 32]> {
         .source_path
         .as_deref()
         .ok_or_else(|| format!("{}: 材料のファイルの場所がわかりません", entry_name(e)))?;
-    let loaded = source::load_material(file.as_ref(), e.git_commit.as_deref(), e.material.as_deref())?;
+    let loaded = load_entry_code(e, file.as_ref())?;
     if !e.code_matches(&loaded.sha256, master) {
         return Err(format!("{}: 材料のコードが登録時と違います", entry_name(e)));
     }
@@ -1232,7 +1361,7 @@ fn rotate_start(
             return Err(format!("{} の署名が合いません。何も変更していません", entry_name(e)));
         }
         hashes.push(match code {
-            Some(c) => source::load_material(c, None, e.material.as_deref())?.sha256,
+            Some(c) => source::load_material(c, None, e.material.as_deref(), e.symbol.as_deref())?.sha256,
             None => registered_code_hash(e, &old_master)?,
         });
     }
@@ -1283,6 +1412,8 @@ fn rotate_start(
             mac: None,
             material: e.material.clone(),
             source_check: None,
+            symbol: None,
+            signer: None,
         };
         if e.is_sealed() {
             ne.seal(&new_master)?;

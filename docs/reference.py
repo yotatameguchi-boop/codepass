@@ -148,3 +148,10 @@ team_secret = combine([parse_share(shares[1]), parse_share(shares[2])])
 assert team_secret == bytes([0x42]) * 32
 print("TEAM_VERIFIER", verifier(team_secret))
 print("TEAM_PASSWORD", gen(team_master(team_secret, b"CodePassTestSalt"), h, "aws.example.com", "root", 24, "strong", 1, True, ver=2))
+
+from reference_syntax import symbol_hash  # noqa: E402
+
+KEYRING = "fn github_key() -> &'static str {\n    \"the quick brown fox\"\n}\n\nfn aws_key() -> u64 {\n    0x5eed ^ 42\n}\n"
+for sym in ["github_key", "aws_key"]:
+    sh = symbol_hash(KEYRING.encode(), "keys.rs", sym)
+    print("SYMBOL", sym, sh.hex(), gen(m, sh, "github.com", "", 24, "strong", 1, True, ver=2))

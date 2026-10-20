@@ -139,3 +139,17 @@ fn rotate_plan_lists_the_affected_services() {
     }
     assert!(String::from_utf8_lossy(&codepass(&config, &["rotate", "status"]).stdout).contains("ありません"));
 }
+
+#[test]
+fn inspect_lists_the_keys_of_a_keyring() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("profile.json");
+    let keys = dir.path().join("keys.rs");
+    fs::write(&keys, "fn github_key() -> &'static str { \"a\" }\nfn aws_key() -> u64 { 42 }\n").unwrap();
+    let out = codepass(&config, &["inspect", keys.to_str().unwrap(), "--symbols"]);
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("github_key") && text.contains("aws_key") && !text.contains(" str "), "{text}");
+    let one = codepass(&config, &["inspect", keys.to_str().unwrap(), "--symbol", "aws_key"]);
+    assert!(String::from_utf8_lossy(&one.stdout).contains("42"));
+    assert!(!codepass(&config, &["inspect", keys.to_str().unwrap(), "--symbol", "nope"]).status.success());
+}

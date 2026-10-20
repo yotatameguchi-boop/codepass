@@ -18,6 +18,16 @@ source code + master secret + site → password
 > **Experimental.** The cryptographic design has not had an external review yet; do not use it for important accounts.
 > Source code is not treated as a secret (it may be public). Security rests on the master secret, and optionally a security key.
 
+## A repository is a keyring
+
+| Property only code has | How CodePass uses it |
+|---|---|
+| Structure | Same password after reformatting or comments (`--material syntax`) |
+| Functions | **One function per service** (`--symbol`): editing other functions changes nothing; editing it rotates only that service |
+| Signed commits | **Only commits you signed count as material** (`--require-signed`) |
+| History | Pin material to a commit (`--git`); old passwords come back from old commits |
+| Volume (a repository) | **A whole directory or repository as material** (`--tree`); sealed, the private repository itself is a second factor |
+
 ## The code's meaning is the key
 
 Register with `--material syntax` and the password follows the code's **syntax**, not its bytes:
@@ -78,7 +88,7 @@ Prebuilt binaries for macOS, Linux and Windows, and the browser extension, are o
 provenance and an SBOM:
 
 ```sh
-gh attestation verify codepass-v0.7.0-aarch64-apple-darwin.tar.gz -R yotatameguchi-boop/codepass
+gh attestation verify codepass-v0.8.0-aarch64-apple-darwin.tar.gz -R yotatameguchi-boop/codepass
 ```
 
 ## Use

@@ -123,6 +123,8 @@ fn hardware_and_entry_mac_vectors() {
         mac: None,
         material: None,
         source_check: None,
+        symbol: None,
+        signer: None,
     };
     entry.sign(&crypto::entry_mac_key(&master).unwrap());
     assert_eq!(
@@ -179,6 +181,8 @@ fn sealed_entry_vectors() {
         mac: None,
         material: None,
         source_check: None,
+        symbol: None,
+        signer: None,
     };
     entry.seal(&master).unwrap();
     entry.sign(&crypto::entry_mac_key(&master).unwrap());
@@ -214,4 +218,35 @@ fn team_vectors() {
     let hash: [u8; 32] = Sha256::digest(SOURCE).into();
     let s = Settings { spec_version: 2, ..settings("aws.example.com", "root", 24, Charset::Strong, 1, true) };
     assert_eq!(&*crypto::derive_with_master(&master, &hash, &s).unwrap(), r#"p;3Cl1fb>e&X)c?9*o8+lXx8"#);
+}
+
+#[test]
+fn symbol_material_vectors() {
+    use codepass::{crypto, syntax};
+    let keyring =
+        "fn github_key() -> &'static str {\n    \"the quick brown fox\"\n}\n\nfn aws_key() -> u64 {\n    0x5eed ^ 42\n}\n";
+    let master = crypto::master_key(SECRET, &SALT).unwrap();
+    let s = Settings { spec_version: 2, ..settings("github.com", "", 24, Charset::Strong, 1, true) };
+    for (sym, hash, password) in [
+        (
+            "github_key",
+            "79759356b5ccc101a79676095655e1eb30df075b8981a2a8c32f9c3795ad5a2c",
+            r#"1./p(xxTs-<D<&>b$7Q]QE$~"#,
+        ),
+        (
+            "aws_key",
+            "d84eeed7c4de14525eb5c95afe3e4e29e64c3c742cf1f58519fc39d9ef92b139",
+            r#"05qP_W{7Uv$&Fiprogu4_02:"#,
+        ),
+    ] {
+        let h = syntax::symbol_hash(keyring.as_bytes(), "keys.rs", sym).unwrap();
+        assert_eq!(hex::encode(h), hash, "{sym}");
+        assert_eq!(&*crypto::derive_with_master(&master, &h, &s).unwrap(), password, "{sym}");
+    }
+    // Rewriting aws_key leaves github_key's hash untouched.
+    let edited = keyring.replace("42", "43");
+    assert_eq!(
+        hex::encode(syntax::symbol_hash(edited.as_bytes(), "keys.rs", "github_key").unwrap()),
+        "79759356b5ccc101a79676095655e1eb30df075b8981a2a8c32f9c3795ad5a2c"
+    );
 }

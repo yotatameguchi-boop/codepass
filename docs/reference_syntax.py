@@ -252,3 +252,110 @@ def syntax_hash(data, name):
         b = t.encode()
         h.update(struct.pack(">I", len(b)) + b)
     return h.digest()
+
+
+# ---- Symbol material (docs/SPEC.md "関数単位の材料") ----
+
+SYMBOL_MATERIAL_ID = "symbol-v1"
+DEFINERS = ["fn", "func", "function", "def", "class", "struct", "enum", "trait", "interface", "type", "impl", "mod",
+            "module", "object", "fun", "val", "var", "let", "const", "static", "union", "namespace", "record", "mut"]
+NOT_A_TYPE = ["if", "while", "for", "switch", "return", "else", "catch", "sizeof", "new", "case", "do", "throw", "await"]
+
+
+def is_word_token(t):
+    return t != "" and all(is_word(c) for c in t)
+
+
+def c_like_end(toks, at):
+    rnd = 0
+    j = at + 1
+    while j < len(toks):
+        t = toks[j]
+        if t in ("(", "["):
+            rnd += 1
+        elif t in (")", "]"):
+            rnd -= 1
+        elif t == ";" and rnd <= 0:
+            return j + 1, False
+        elif t == "{" and rnd <= 0:
+            braces = 0
+            for k in range(j, len(toks)):
+                if toks[k] == "{":
+                    braces += 1
+                elif toks[k] == "}":
+                    braces -= 1
+                    if braces == 0:
+                        return k + 1, True
+            return len(toks), True
+        j += 1
+    return len(toks), False
+
+
+def python_block_end(toks, start):
+    j = start
+    while j < len(toks) and toks[j] != NEWLINE:
+        j += 1
+    if j + 1 < len(toks) and toks[j + 1] == INDENT:
+        level = 0
+        for k in range(j + 1, len(toks)):
+            if toks[k] == INDENT:
+                level += 1
+            elif toks[k] == DEDENT:
+                level -= 1
+                if level == 0:
+                    return k + 1
+        return len(toks)
+    return min(j + 1, len(toks))
+
+
+def line_end(toks, start):
+    j = start
+    while j < len(toks) and toks[j] != NEWLINE:
+        j += 1
+    return min(j + 1, len(toks))
+
+
+def definitions(toks, lang):
+    out = []
+    for i, name in enumerate(toks):
+        if not is_word_token(name) or name in DEFINERS:
+            continue
+        prev = toks[i - 1] if i > 0 else None
+        nxt = toks[i + 1] if i + 1 < len(toks) else None
+        names_something = not (nxt is not None and is_word_token(nxt))
+        after_lifetime = i >= 2 and toks[i - 2] == "'"
+        if prev is not None and prev in DEFINERS and names_something and not after_lifetime:
+            start = i - 1
+            if lang == "python":
+                end = python_block_end(toks, start) if toks[start] in ("def", "class") else line_end(toks, start)
+            else:
+                end = c_like_end(toks, i)[0]
+            out.append((name, start, end))
+            continue
+        if lang == "python":
+            if prev in (None, NEWLINE, INDENT, DEDENT) and nxt == "=":
+                out.append((name, i, line_end(toks, i)))
+            continue
+        type_like = prev is not None and (
+            (is_word_token(prev) and prev not in NOT_A_TYPE) or prev in ("*", "&", ">", "]", ")"))
+        if type_like and nxt == "(":
+            end, braced = c_like_end(toks, i)
+            if braced:
+                out.append((name, i, end))
+    return out
+
+
+def symbol_hash(data, file_name, name):
+    lang = lang_for(file_name)
+    if lang is None or not is_word_token(name):
+        raise SyntaxError_("unsupported")
+    toks = tokens(data.decode("utf-8"), lang)
+    found = [d for d in definitions(toks, lang) if d[0] == name]
+    if not found:
+        raise SyntaxError_("no such definition")
+    _, start, end = found[0]
+    h = hashlib.sha256(f"CodePass/{SYMBOL_MATERIAL_ID}\0{lang}\0{name}\0".encode())
+    for t in toks[start:end]:
+        b = t.encode()
+        h.update(struct.pack(">I", len(b)) + b)
+    return h.digest()

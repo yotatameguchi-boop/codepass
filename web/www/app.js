@@ -1,4 +1,4 @@
-import init, { generate, site_key, random_salt, self_test, syntax_preview } from "./pkg/codepass_web.js";
+import init, { generate, site_key, random_salt, self_test, syntax_preview, symbol_preview } from "./pkg/codepass_web.js";
 
 const $ = (id) => document.getElementById(id);
 const encoder = new TextEncoder();
@@ -13,8 +13,48 @@ async function sha256Hex(bytes) {
 
 let lastSyntaxHash = "";
 
+function showTokens(tokens) {
+  const chips = $("tokens");
+  chips.replaceChildren();
+  for (const t of tokens.slice(0, 200)) {
+    const span = document.createElement("span");
+    span.textContent = t === "\u0000NEWLINE" ? "⏎" : t === "\u0000INDENT" ? "⇥" : t === "\u0000DEDENT" ? "⇤" : t;
+    if (t.startsWith("\u0000")) span.className = "layout";
+    chips.append(span);
+  }
+  $("token-count").textContent = `${tokens.length} 個`;
+}
+
+const lastHashes = {};
+
 async function refreshHash() {
-  const syntax = $("material").value === "syntax";
+  const mode = $("material").value;
+  $("symbol-row").hidden = mode !== "symbol";
+  if (mode === "symbol") {
+    $("tokens-box").hidden = false;
+    try {
+      const p = JSON.parse(symbol_preview(new TextDecoder().decode(sourceBytes), $("filename").value, $("symbol").value));
+      const sel = $("symbol");
+      const keep = sel.value;
+      sel.replaceChildren(...p.names.map((n) => Object.assign(document.createElement("option"), { value: n, textContent: n })));
+      sel.value = p.names.includes(keep) ? keep : p.symbol;
+      if (!p.symbol) {
+        $("hash").textContent = "鍵にできる定義（関数・クラス・定数）が見つかりません";
+        showTokens([]);
+        return;
+      }
+      const changed = lastHashes[p.symbol] && lastHashes[p.symbol] !== p.hash;
+      lastHashes[p.symbol] = p.hash;
+      $("hash").textContent = `関数「${p.symbol}」のハッシュ（${p.lang}）: ${p.hash.slice(0, 24)}… ${changed ? "← 変わりました" : "（ほかの関数を変えても変わりません）"}`;
+      $("hash").classList.toggle("changed", Boolean(changed));
+      showTokens(p.tokens);
+    } catch (e) {
+      $("hash").textContent = "構文として読めません: " + String(e.message ?? e);
+      showTokens([]);
+    }
+    return;
+  }
+  const syntax = mode === "syntax";
   $("tokens-box").hidden = !syntax;
   if (!syntax) {
     $("hash").textContent = "バイト列の SHA-256: " + (await sha256Hex(sourceBytes)).slice(0, 24) + "…";
@@ -83,6 +123,7 @@ async function run() {
         $("registered").value,
         $("material").value === "syntax",
         $("filename").value,
+        $("material").value === "symbol" ? $("symbol").value : "",
       ),
     );
     password = out.password;
@@ -143,6 +184,7 @@ async function main() {
     await refreshHash();
   });
   $("material").addEventListener("change", refreshHash);
+  $("symbol").addEventListener("change", refreshHash);
   $("filename").addEventListener("input", refreshHash);
   $("file").addEventListener("change", async () => {
     const f = $("file").files[0];

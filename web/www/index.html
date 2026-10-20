@@ -28,7 +28,8 @@
       <div>
         <label for="material">材料の使い方</label>
         <select id="material">
-          <option value="syntax">構文（整形・コメントは無視）</option>
+          <option value="symbol">関数単位（1つの関数だけ）</option>
+          <option value="syntax">ファイルの構文（整形・コメントは無視）</option>
           <option value="bytes">バイト列そのもの</option>
         </select>
       </div>
@@ -37,14 +38,19 @@
         <input type="text" id="filename" value="main.rs" class="mono" autocomplete="off" spellcheck="false">
       </div>
     </div>
+    <div id="symbol-row">
+      <label for="symbol">鍵にする関数</label>
+      <select id="symbol"></select>
+      <p class="hint">1つのファイルが鍵束になります。ほかの関数を書き換えても、選んだ関数のパスワードは変わりません。</p>
+    </div>
     <label for="source">材料のソースコード</label>
-    <textarea id="source" rows="8" spellcheck="false">fn main() {
-    let total = add(2, 3);
-    println!("{total}");
+    <textarea id="source" rows="10" spellcheck="false">// 鍵束：サービスごとに1つの関数
+fn github_key() -> &'static str {
+    "the quick brown fox jumps over the lazy dog"
 }
 
-fn add(a: i32, b: i32) -> i32 {
-    a + b
+fn aws_key() -> u64 {
+    0x5eed_cafe ^ 42
 }
 </textarea>
     <div class="row">

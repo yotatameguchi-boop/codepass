@@ -59,3 +59,88 @@ fn git_source_ignores_working_tree_changes() {
     assert!(codepass::source::load(&path, Some("--output=/tmp/x")).is_err());
     assert!(codepass::source::load(&dir.path().join("other.rs"), Some(&commit)).is_err());
 }
+
+fn git_in(dir: &std::path::Path, args: &[&str]) -> std::process::Output {
+    std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["-c", "user.name=t", "-c", "user.email=t@example.com", "-c", "core.autocrlf=false"])
+        .args(args)
+        .output()
+        .unwrap()
+}
+
+#[test]
+fn tree_material_covers_the_whole_directory() {
+    use codepass::source::{load_material, TREE_MATERIAL_ID};
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    fs::create_dir_all(root.join("keys")).unwrap();
+    fs::write(root.join("keys/a.rs"), "fn a() {}\n").unwrap();
+    fs::write(root.join("README.md"), "x\n").unwrap();
+    assert!(git_in(root, &["init", "-q"]).status.success());
+    assert!(git_in(root, &["add", "."]).status.success());
+    assert!(git_in(root, &["commit", "-q", "-m", "1"]).status.success());
+    let tree = |path: &std::path::Path| {
+        load_material(path, Some("HEAD"), Some(TREE_MATERIAL_ID), None).unwrap().sha256
+    };
+    let (whole1, keys1) = (tree(root), tree(&root.join("keys")));
+    // A change outside keys/ changes the whole repository's material but not keys/.
+    fs::write(root.join("README.md"), "y\n").unwrap();
+    assert!(git_in(root, &["commit", "-qam", "2"]).status.success());
+    assert_ne!(tree(root), whole1);
+    assert_eq!(tree(&root.join("keys")), keys1);
+    // A change inside keys/ changes it.
+    fs::write(root.join("keys/a.rs"), "fn a() { 1 }\n").unwrap();
+    assert!(git_in(root, &["commit", "-qam", "3"]).status.success());
+    assert_ne!(tree(&root.join("keys")), keys1);
+    // Without a commit there is no tree material.
+    assert!(load_material(root, None, Some(TREE_MATERIAL_ID), None).is_err());
+}
+
+#[cfg(unix)]
+#[test]
+fn only_signed_commits_count_when_required() {
+    use codepass::source::signer_of;
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("repo");
+    fs::create_dir_all(&root).unwrap();
+    let key = dir.path().join("key");
+    let keygen = std::process::Command::new("ssh-keygen")
+        .args(["-q", "-t", "ed25519", "-N", "", "-C", "me", "-f"])
+        .arg(&key)
+        .status();
+    if !keygen.is_ok_and(|s| s.success()) {
+        eprintln!("ssh-keygen がないため省略");
+        return;
+    }
+    let public = fs::read_to_string(key.with_extension("pub")).unwrap();
+    let allowed = dir.path().join("allowed");
+    fs::write(&allowed, format!("t@example.com namespaces=\"git\" {public}")).unwrap();
+    assert!(git_in(&root, &["init", "-q"]).status.success());
+    for (k, v) in [
+        ("gpg.format", "ssh"),
+        ("user.signingkey", key.with_extension("pub").to_str().unwrap()),
+        ("gpg.ssh.allowedSignersFile", allowed.to_str().unwrap()),
+    ] {
+        assert!(git_in(&root, &["config", k, v]).status.success());
+    }
+    fs::write(root.join("keys.rs"), "fn k() {}\n").unwrap();
+    assert!(git_in(&root, &["add", "."]).status.success());
+    let signed = git_in(&root, &["commit", "-q", "-S", "-m", "signed"]);
+    if !signed.status.success() {
+        eprintln!(
+            "この環境の git では SSH 署名ができないため省略: {}",
+            String::from_utf8_lossy(&signed.stderr)
+        );
+        return;
+    }
+    let head = |r: &std::path::Path| {
+        String::from_utf8(git_in(r, &["rev-parse", "HEAD"]).stdout).unwrap().trim().to_string()
+    };
+    let signer = signer_of(&root.join("keys.rs"), &head(&root)).unwrap();
+    assert!(signer.starts_with("SHA256:"), "{signer}");
+    fs::write(root.join("keys.rs"), "fn k() { 1 }\n").unwrap();
+    assert!(git_in(&root, &["commit", "-qam", "unsigned", "--no-gpg-sign"]).status.success());
+    assert!(signer_of(&root.join("keys.rs"), &head(&root)).is_err());
+}
